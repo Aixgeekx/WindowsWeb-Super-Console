@@ -70,7 +70,10 @@ def get_uptime():
     out = run_ps("""
         $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
         $span = (Get-Date) - $boot
-        "${d}d ${h}h ${m}m" -replace '\\$d',([int]$span.TotalDays) -replace '\\$h',$span.Hours -replace '\\$m',$span.Minutes
+        $d = [int]$span.TotalDays
+        $h = $span.Hours
+        $m = $span.Minutes
+        "${d}d ${h}h ${m}m"
     """)
     return out if out else "N/A"
 
