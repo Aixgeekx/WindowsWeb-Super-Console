@@ -63,21 +63,14 @@ def get_disk_info():
         if "|" in line:
             parts = line.split("|")
             if len(parts) == 5:
-                disks.append({
-                    "drive": parts[0], "used": float(parts[1]),
-                    "total": float(parts[2]), "free": float(parts[3]),
-                    "percent": float(parts[4])
-                })
+                disks.append({"drive": parts[0], "used": float(parts[1]), "total": float(parts[2]), "free": float(parts[3]), "percent": float(parts[4])})
     return disks
 
 def get_uptime():
     out = run_ps("""
         $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
         $span = (Get-Date) - $boot
-        $d = [int]$span.TotalDays
-        $h = $span.Hours
-        $m = $span.Minutes
-        "${d}d ${h}h ${m}m"
+        "${d}d ${h}h ${m}m" -replace '\\$d',([int]$span.TotalDays) -replace '\\$h',$span.Hours -replace '\\$m',$span.Minutes
     """)
     return out if out else "N/A"
 
@@ -115,12 +108,7 @@ def get_top_processes(n=8):
     return procs
 
 def get_gpu_info():
-    out = run_ps("""
-        try {
-            $gpu = Get-CimInstance Win32_VideoController | Select-Object -First 1
-            "$($gpu.Name)"
-        } catch { "N/A" }
-    """)
+    out = run_ps('try { (Get-CimInstance Win32_VideoController | Select-Object -First 1).Name } catch { "N/A" }')
     return out
 
 # ─── 保持屏幕唤醒 ───
@@ -130,14 +118,8 @@ keep_screen_alive = False
 def set_keep_screen_alive(enable):
     global keep_screen_alive
     keep_screen_alive = enable
-    # ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
     flag = "0x80000000 | 0x00000001 | 0x00000002" if enable else "0x80000000"
-    run_ps(f'Add-Type @"using System.Runtime.InteropServices; public class WinAPI {{ [DllImport(\"kernel32.dll\")] public static extern uint SetThreadExecutionState(uint esFlags); }}"; [WinAPI]::SetThreadExecutionState({flag})')
-    return keep_screen_alive
-
-def start_keep_alive():
-    """启动时自动保持屏幕唤醒"""
-    set_keep_screen_alive(True)
+    run_ps(f'Add-Type @"using System.Runtime.InteropServices; public class WinAPI {{ [DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint esFlags); }}"; [WinAPI]::SetThreadExecutionState({flag})')
 
 # ─── 截屏 ───
 
@@ -145,28 +127,17 @@ def take_screenshot():
     ps_script = '''
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
-    $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
-    $bitmap = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-    # Convert to RGB to avoid transparency issues
-    $rgb = New-Object System.Drawing.Bitmap($bitmap.Width, $bitmap.Height, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
-    $g2 = [System.Drawing.Graphics]::FromImage($rgb)
-    $g2.DrawImage($bitmap, 0, 0)
+    $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+    $bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
     $ms = New-Object System.IO.MemoryStream
-    $rgb.Save($ms, [System.Drawing.Imaging.ImageFormat]::Jpeg)
-    $base64 = [Convert]::ToBase64String($ms.ToArray())
-    $graphics.Dispose()
-    $bitmap.Dispose()
-    $g2.Dispose()
-    $rgb.Dispose()
-    $base64
+    $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+    [Convert]::ToBase64String($ms.ToArray())
+    $g.Dispose(); $bmp.Dispose(); $ms.Dispose()
     '''
     try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_script],
-            capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace"
-        )
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps_script], capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace")
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout.strip()
     except:
@@ -176,7 +147,6 @@ def take_screenshot():
 # ─── 文件浏览 ───
 
 def get_drives():
-    """获取所有磁盘驱动器"""
     out = run_ps('Get-PSDrive -PSProvider FileSystem | ForEach-Object { "$($_.Name)|$([math]::Round($_.Used/1GB,1))|$([math]::Round($_.Free/1GB,1))" }')
     drives = []
     for line in out.split("\n"):
@@ -184,18 +154,12 @@ def get_drives():
         if "|" in line:
             parts = line.split("|")
             if len(parts) == 3:
-                name = parts[0]
-                used = parts[1]
-                free = parts[2]
-                drives.append({"name": f"{name}\\", "used": used, "free": free})
+                drives.append({"letter": parts[0], "used": parts[1], "free": parts[2]})
     return drives
 
 def list_directory(path):
-    """列出目录内容"""
-    if not path or not os.path.exists(path):
-        return None, f"Path not found: {path}"
     if not os.path.isdir(path):
-        return None, f"Not a directory: {path}"
+        return None, f"Not found: {path}"
     items = []
     try:
         for name in os.listdir(path):
@@ -204,34 +168,33 @@ def list_directory(path):
                 is_dir = os.path.isdir(full)
                 size = 0 if is_dir else os.path.getsize(full)
                 mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(full)))
-                items.append({"name": name, "is_dir": is_dir, "size": size, "mtime": mtime})
+                items.append({"name": name, "dir": is_dir, "size": size, "time": mtime})
             except:
-                items.append({"name": name, "is_dir": False, "size": 0, "mtime": "?"})
+                items.append({"name": name, "dir": False, "size": 0, "time": "?"})
     except PermissionError:
-        return None, "Permission denied"
+        return [], "Access denied"
     except Exception as e:
-        return None, str(e)
-    items.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
+        return [], str(e)
+    items.sort(key=lambda x: (not x["dir"], x["name"].lower()))
     return items, None
 
 # ─── 缓存 ───
 
 cache = {}
 cache_time = 0
-CACHE_TTL = 3
 
 def get_all_status():
     global cache, cache_time
     now = time.time()
-    if now - cache_time < CACHE_TTL and cache:
+    if now - cache_time < 3 and cache:
         return cache
     net = get_network_info()
     mem = get_memory_info()
     cache = {
-        "cpu": get_cpu_usage(), "memory": mem, "disks": get_disk_info(),
-        "uptime": get_uptime(), "process_count": get_process_count(),
-        "network": net, "gpu": get_gpu_info(), "top_processes": get_top_processes(8),
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+        "cpu": get_cpu_usage(), "mem": mem, "disks": get_disk_info(),
+        "uptime": get_uptime(), "procs": get_process_count(),
+        "net": net, "gpu": get_gpu_info(), "top": get_top_processes(8),
+        "ts": time.strftime("%Y-%m-%d %H:%M:%S")
     }
     cache_time = now
     return cache
@@ -274,13 +237,6 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;paddi
 .tab-content{display:none}.tab-content.active{display:block}
 .sbtn{display:inline-flex;align-items:center;gap:6px;padding:10px 18px;border:none;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;color:#fff;background:linear-gradient(135deg,#667eea,#764ba2);margin:4px}
 .sbtn:disabled{opacity:.5}.sbtn:active{transform:scale(.95)}
-.sprev{margin-top:12px;text-align:center;display:none}
-.sprev img{width:100%;height:auto;border-radius:8px;border:1px solid rgba(255,255,255,.1);cursor:pointer;display:block}
-.sprev .hint{font-size:12px;color:#888;margin-top:8px}
-/* Fullscreen preview */
-.ss-full{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.95);z-index:9999;overflow:auto;-webkit-overflow-scrolling:touch}
-.ss-full img{display:block;margin:10px auto;max-width:98vw;max-height:98vh;object-fit:contain}
-.ss-full .close{position:fixed;top:10px;right:16px;color:#fff;font-size:28px;cursor:pointer;z-index:10000;background:rgba(0,0,0,.5);width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center}
 .tbox{display:none;margin-top:12px;background:#0d0d0d;border-radius:8px;border:1px solid rgba(255,255,255,.1);overflow:hidden}
 .thdr{background:rgba(255,255,255,.06);padding:8px 12px;font-size:12px;color:#888;display:flex;align-items:center;justify-content:space-between}
 .thdr .x{background:none;border:none;color:#888;font-size:18px;cursor:pointer;padding:0 4px}
@@ -291,31 +247,30 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;paddi
 .ti{flex:1;background:none;border:none;color:#fff;font-family:monospace;font-size:13px;outline:none}
 .ts{background:#69f0ae;border:none;color:#000;padding:4px 12px;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer}
 .flist{max-height:500px;overflow-y:auto}
-.fitem{display:flex;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:13px;cursor:pointer;transition:background .15s}
-.fitem:hover{background:rgba(255,255,255,.04)}
+.fitem{display:flex;align-items:center;padding:10px 8px;border-bottom:1px solid rgba(255,255,255,.04);font-size:13px;cursor:pointer;transition:background .15s}
+.fitem:active{background:rgba(255,255,255,.08)}
 .fitem:last-child{border:none}
 .ficon{width:28px;text-align:center;font-size:16px}
 .fname{flex:1;color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fsize{width:80px;text-align:right;color:#888;font-size:12px}
 .fdate{width:100px;text-align:right;color:#666;font-size:12px}
-.fbpath{font-size:12px;color:#666;margin-bottom:8px;font-family:monospace;word-break:break-all}
 .footer{position:fixed;bottom:0;left:0;right:0;text-align:center;padding:12px;background:rgba(10,10,26,.95);backdrop-filter:blur(10px);border-top:1px solid rgba(255,255,255,.06);font-size:12px;color:#666}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 .ld{display:inline-block;width:6px;height:6px;background:#00c853;border-radius:50%;margin-right:4px;animation:pulse 2s infinite}
 @keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
 .loading{animation:spin 1s linear infinite;display:inline-block}
-.drive-item{display:flex;align-items:center;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:14px;cursor:pointer}
+.drive-item{display:flex;align-items:center;padding:12px 8px;border-bottom:1px solid rgba(255,255,255,.04);cursor:pointer;transition:background .15s}
+.drive-item:active{background:rgba(255,255,255,.08)}
 .drive-item:last-child{border:none}
-.drive-item:hover{background:rgba(255,255,255,.04)}
 .drive-icon{font-size:20px;margin-right:10px}
-.drive-name{font-weight:600;color:#69f0ae}
+.drive-name{font-weight:600;color:#69f0ae;font-size:15px}
 .drive-info{margin-left:auto;font-size:12px;color:#888}
 </style>
 </head>
 <body>
 <div class="hdr">
   <h1 id="hostname">{{HOSTNAME}}</h1>
-  <div class="sub">LAN: {{IP}}</div>
+  <div class="sub">{{IP}}</div>
   <div class="sub">{{UPTIME}}</div>
 </div>
 
@@ -325,7 +280,7 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;paddi
   <div class="tab" onclick="switchTab('tools')">Tools</div>
 </div>
 
-<!-- Tab: Status -->
+<!-- Status -->
 <div class="tab-content active" id="tab-status">
   <div class="row">
     <div class="card"><div class="ct">CPU</div><div class="bnum" style="color:{{CPU_C}}">{{CPU}}<span class="u">%</span></div></div>
@@ -341,30 +296,26 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;paddi
   <div class="card"><div class="ct">TOP PROCESSES</div><div class="pr ph"><span class="pn">Name</span><span class="pc">CPU</span><span class="pm">Memory</span></div>{{PROCS}}</div>
 </div>
 
-<!-- Tab: Files -->
+<!-- Files -->
 <div class="tab-content" id="tab-files">
   <div class="card">
     <div class="ct">FILE BROWSER</div>
-    <div class="fbpath" id="fbPath">All Drives</div>
-    <div class="flist" id="fileList"><div class="fbread">Loading...</div></div>
+    <div id="fbPath" style="font-size:13px;color:#69f0ae;margin-bottom:10px;font-family:monospace">Loading...</div>
+    <div class="flist" id="fileList"></div>
   </div>
 </div>
 
-<!-- Tab: Tools -->
+<!-- Tools -->
 <div class="tab-content" id="tab-tools">
   <div class="card" style="text-align:center">
     <div class="ct">TOOLS</div>
     <button class="sbtn" onclick="takeSS()" id="ssBtn">Screenshot</button>
     <button class="sbtn" style="background:linear-gradient(135deg,#11998e,#38ef7d)" onclick="toggleTerm()">PowerShell</button>
   </div>
-  <div class="card">
-    <div class="ct">SCREEN KEEP-ALIVE</div>
-    <div style="display:flex;align-items:center;gap:12px;justify-content:center">
-      <span id="kaStatus" style="color:#69f0ae;font-weight:500">ON</span>
-      <button class="sbtn" style="background:#444;padding:8px 16px;font-size:12px" onclick="toggleKeepAlive()">Toggle</button>
-    </div>
+  <div class="card" id="ssCard" style="display:none">
+    <div class="ct">SCREENSHOT</div>
+    <img id="ssImg" style="width:100%;height:auto;display:block;border-radius:8px">
   </div>
-  <div class="sprev" id="ssPrev"><div class="card"><div class="ct">SCREENSHOT</div><img id="ssImg" src=""><div class="hint">Tap image for fullscreen &middot; Long press to save</div></div></div>
   <div class="tbox" id="termBox">
     <div class="thdr"><span>PowerShell</span><button class="x" onclick="toggleTerm()">&times;</button></div>
     <div class="tout" id="termOut">Ready.\n\n</div>
@@ -372,177 +323,110 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;paddi
   </div>
 </div>
 
-<div class="ss-full" id="ssFull" onclick="closeFullSS()"><span class="close">&times;</span><img id="ssFullImg"></div>
-<div class="footer"><span class="ld"></span> Live &middot; <span id="ts">{{TIMESTAMP}}</span></div>
+<div class="footer"><span class="ld"></span> <span id="ts">{{TIMESTAMP}}</span></div>
 
 <script>
-function switchTab(name){
-  document.querySelectorAll('.tab').forEach((t,i)=>{t.classList.toggle('active',['status','files','tools'][i]===name)});
+// Tab
+function switchTab(n){
+  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['status','files','tools'][i]===n));
   document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
-  document.getElementById('tab-'+name).classList.add('active');
+  document.getElementById('tab-'+n).classList.add('active');
+  if(n==='files'&&!loaded)loadDrives();
 }
 
-let refreshTimer=null;
-function scheduleRefresh(){
-  clearTimeout(refreshTimer);
-  if(!document.hidden){
-    refreshTimer=setTimeout(async()=>{
-      if(document.hidden)return;
-      try{
-        const r=await fetch('/api');
-        const d=await r.json();
-        // Update CPU
-        document.querySelector('#tab-status .row .card:first-child .bnum').innerHTML=d.cpu+'<span class="u">%</span>';
-        // Update MEM
-        document.querySelector('#tab-status .row .card:last-child .bnum').innerHTML=d.memory.percent+'<span class="u">%</span>';
-        document.querySelector('#tab-status .row .card:last-child .si').textContent=d.memory.used+' / '+d.memory.total+' GB';
-        // Update timestamp
-        document.getElementById('ts').textContent=d.timestamp;
-        // Update uptime
-        document.querySelector('.hdr .sub:last-child').textContent='Uptime: '+d.uptime;
-        // Update process count
-        document.querySelector('#tab-status .row:nth-child(4) .card:first-child .bnum').textContent=d.process_count;
-      }catch(e){}
-      scheduleRefresh();
-    },3000)
-  }
+// AJAX refresh
+let rt=null;
+function sched(){
+  clearTimeout(rt);
+  if(!document.hidden)rt=setTimeout(async()=>{
+    if(document.hidden)return;
+    try{
+      const d=await(await fetch('/api')).json();
+      document.querySelector('#tab-status .row .card:first-child .bnum').innerHTML=d.cpu+'<span class="u">%</span>';
+      document.querySelector('#tab-status .row .card:last-child .bnum').innerHTML=d.mem.percent+'<span class="u">%</span>';
+      document.querySelector('#tab-status .row .card:last-child .si').textContent=d.mem.used+' / '+d.mem.total+' GB';
+      document.getElementById('ts').textContent=d.ts;
+      document.querySelector('.hdr .sub:last-child').textContent='Uptime: '+d.uptime;
+    }catch(e){}
+    sched();
+  },3000);
 }
-document.addEventListener('visibilitychange',scheduleRefresh);
-window.addEventListener('focus',scheduleRefresh);
-scheduleRefresh();
+document.addEventListener('visibilitychange',sched);
+sched();
 
+// Screenshot
 async function takeSS(){
-  const btn=document.getElementById('ssBtn'),prev=document.getElementById('ssPrev'),img=document.getElementById('ssImg');
+  const btn=document.getElementById('ssBtn');
   btn.disabled=true;btn.innerHTML='<span class="loading">&#8635;</span> Capturing...';
   try{
     const r=await fetch('/api/screenshot');
     const d=await r.json();
-    if(d.ok){img.src='data:image/jpeg;base64,'+d.image;prev.style.display='block'}
-    else alert('Failed: '+(d.error||'Unknown'));
+    if(d.ok){
+      document.getElementById('ssImg').src='data:image/jpeg;base64,'+d.image;
+      document.getElementById('ssCard').style.display='block';
+    }else alert('Failed');
   }catch(e){alert('Error: '+e.message)}
   btn.disabled=false;btn.innerHTML='Screenshot';
 }
-function dlSS(){
-  const a=document.createElement('a');
-  a.href=document.getElementById('ssImg').src;
-  a.download='screenshot_'+new Date().toISOString().slice(0,19).replace(/[T:]/g,'-')+'.jpg';
-  a.click();
-}
-function openFullSS(){
-  const src=document.getElementById('ssImg').src;
-  if(!src)return;
-  document.getElementById('ssFullImg').src=src;
-  document.getElementById('ssFull').style.display='block';
-  document.body.style.overflow='hidden';
-}
-function closeFullSS(){
-  document.getElementById('ssFull').style.display='none';
-  document.body.style.overflow='';
-}
-document.getElementById('ssImg').addEventListener('click',openFullSS);
 
-let termVis=false,cmdHist=[],histIdx=-1;
-function toggleTerm(){
-  termVis=!termVis;
-  document.getElementById('termBox').style.display=termVis?'block':'none';
-  if(termVis)document.getElementById('termIn').focus();
-}
+// Terminal
+let tv=false,ch=[],ci=-1;
+function toggleTerm(){tv=!tv;document.getElementById('termBox').style.display=tv?'block':'none';if(tv)document.getElementById('termIn').focus()}
 async function sendCmd(){
   const inp=document.getElementById('termIn'),out=document.getElementById('termOut');
   const cmd=inp.value.trim();if(!cmd)return;
-  cmdHist.push(cmd);histIdx=cmdHist.length;
+  ch.push(cmd);ci=ch.length;
   out.textContent+='PS> '+cmd+'\n';inp.value='';out.scrollTop=out.scrollHeight;
-  try{
-    const r=await fetch('/api/terminal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd})});
-    const d=await r.json();
-    if(d.output)out.textContent+=d.output+'\n\n';
-    if(d.error)out.textContent+='[ERROR] '+d.error+'\n\n';
-  }catch(e){out.textContent+='[NET ERROR] '+e.message+'\n\n'}
+  try{const r=await fetch('/api/terminal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd})});const d=await r.json();if(d.output)out.textContent+=d.output+'\n\n';if(d.error)out.textContent+='[ERROR] '+d.error+'\n\n';}catch(e){out.textContent+='[ERR] '+e.message+'\n\n'}
   out.scrollTop=out.scrollHeight;
 }
 document.getElementById('termIn').addEventListener('keydown',function(e){
   if(e.key==='Enter')sendCmd();
-  else if(e.key==='ArrowUp'){e.preventDefault();if(histIdx>0){histIdx--;this.value=cmdHist[histIdx]}}
-  else if(e.key==='ArrowDown'){e.preventDefault();if(histIdx<cmdHist.length-1){histIdx++;this.value=cmdHist[histIdx]}else{histIdx=cmdHist.length;this.value=''}}
+  else if(e.key==='ArrowUp'){e.preventDefault();if(ci>0){ci--;this.value=ch[ci]}}
+  else if(e.key==='ArrowDown'){e.preventDefault();if(ci<ch.length-1){ci++;this.value=ch[ci]}else{ci=ch.length;this.value=''}}
 });
 
-// File browser
-let currentPath = null;
-
+// File browser - 使用 data-path 避免转义问题
+let loaded=false;
 async function loadDrives(){
+  loaded=true;
   try{
-    const r = await fetch('/api/drives');
-    const d = await r.json();
-    const c = document.getElementById('fileList');
-    let h = '';
-    d.drives.forEach(dr => {
-      h += '<div class="drive-item" onclick="browseDir(\''+esc(dr.name)+'\')">';
-      h += '<span class="drive-icon">&#128190;</span>';
-      h += '<span class="drive-name">'+dr.name+'</span>';
-      h += '<span class="drive-info">Used: '+dr.used+' GB | Free: '+dr.free+' GB</span>';
-      h += '</div>';
+    const d=await(await fetch('/api/drives')).json();
+    const c=document.getElementById('fileList');
+    let h='';
+    d.drives.forEach(dr=>{
+      h+='<div class="drive-item" data-path="'+dr.letter+':\\" onclick="openDir(this.dataset.path)">';
+      h+='<span class="drive-icon">&#128190;</span>';
+      h+='<span class="drive-name">'+dr.letter+':\\</span>';
+      h+='<span class="drive-info">'+dr.used+' GB / '+dr.free+' GB free</span>';
+      h+='</div>';
     });
-    c.innerHTML = h;
-    document.getElementById('fbPath').textContent = 'All Drives';
-    currentPath = null;
-  }catch(e){console.error(e)}
+    c.innerHTML=h;
+    document.getElementById('fbPath').textContent='All Drives';
+  }catch(e){document.getElementById('fileList').innerHTML='<div style="color:#ff8a80">Error loading drives</div>'}
 }
 
-function browseDir(path){
-  currentPath = path;
-  // Use raw path without extra encoding
-  const url = '/api/files?path=' + encodeURIComponent(path);
-  console.log('browseDir:', path, 'url:', url);
-  fetch(url).then(r=>r.json()).then(d=>{
-    if(d.error){alert(d.error);return}
-    document.getElementById('fbPath').textContent = d.path;
-    renderFiles(d.items, d.path);
-  }).catch(e=>alert('Network error: '+e.message));
-}
-
-function renderFiles(items, path){
-  const c = document.getElementById('fileList');
-  let h = '';
-  // Back button
-  if(path && path !== currentPath){
-    const parent = path.replace(/[\\\/][^\\\/]+[\\\/]?$/, '') || null;
-    if(parent){
-      h += '<div class="fitem" onclick="browseDir(\''+esc(parent)+'\')"><span class="ficon">&#128194;</span><span class="fname">..</span></div>';
-    } else {
-      h += '<div class="fitem" onclick="loadDrives()"><span class="ficon">&#128194;</span><span class="fname">.. Back to Drives</span></div>';
-    }
-  } else {
-    h += '<div class="fitem" onclick="loadDrives()"><span class="ficon">&#128194;</span><span class="fname">.. Back to Drives</span></div>';
-  }
-  items.forEach(i => {
-    const full = path.endsWith('\\') ? path + i.name : path + '\\' + i.name;
-    if(i.is_dir){
-      h += '<div class="fitem" onclick="browseDir(\''+esc(full)+'\')"><span class="ficon">&#128193;</span><span class="fname">'+i.name+'</span><span class="fdate">'+i.mtime+'</span></div>';
-    } else {
-      const sz = i.size>1048576 ? (i.size/1048576).toFixed(1)+'MB' : i.size>1024 ? (i.size/1024).toFixed(0)+'KB' : i.size+'B';
-      h += '<div class="fitem"><span class="ficon">&#128196;</span><span class="fname">'+i.name+'</span><span class="fsize">'+sz+'</span><span class="fdate">'+i.mtime+'</span></div>';
-    }
-  });
-  c.innerHTML = h;
-}
-
-function esc(s){return s.replace(/\\/g,'/').replace(/'/g,"\\'")}
-// Convert forward slashes back to backslashes for Windows paths
-function toWin(p){return p.replace(/\//g,'\\')}
-
-// Keep alive toggle
-let kaState=true;
-async function toggleKeepAlive(){
-  kaState=!kaState;
+async function openDir(path){
   try{
-    await fetch('/api/keepalive?set='+(kaState?'on':'off'));
-    document.getElementById('kaStatus').textContent=kaState?'ON':'OFF';
-    document.getElementById('kaStatus').style.color=kaState?'#69f0ae':'#ff8a80';
-  }catch(e){}
+    const r=await fetch('/api/files?p='+encodeURIComponent(path));
+    const d=await r.json();
+    if(d.error){alert(d.error);return}
+    document.getElementById('fbPath').textContent=d.path;
+    const c=document.getElementById('fileList');
+    let h='<div class="fitem" onclick="loadDrives()"><span class="ficon">&#128194;</span><span class="fname" style="color:#69f0ae">Back to Drives</span></div>';
+    d.items.forEach(i=>{
+      if(i.dir){
+        const fp=d.path.replace(/\\$/,'')+'\\'+i.name;
+        h+='<div class="fitem" data-path="'+fp+'" onclick="openDir(this.dataset.path)">';
+        h+='<span class="ficon">&#128193;</span><span class="fname">'+i.name+'</span><span class="fdate">'+i.time+'</span></div>';
+      }else{
+        const sz=i.size>1048576?(i.size/1048576).toFixed(1)+'MB':i.size>1024?(i.size/1024).toFixed(0)+'KB':i.size+'B';
+        h+='<div class="fitem"><span class="ficon">&#128196;</span><span class="fname">'+i.name+'</span><span class="fsize">'+sz+'</span><span class="fdate">'+i.time+'</span></div>';
+      }
+    });
+    c.innerHTML=h;
+  }catch(e){alert('Network error')}
 }
-
-// Load drives on page load
-loadDrives();
 </script>
 </body>
 </html>"""
@@ -563,102 +447,84 @@ def render_procs(procs):
         h+=f'<div class="pr"><span class="pn">{p["name"]}</span><span class="pc">{p["cpu"]:.1f}s</span><span class="pm">{p["mem_mb"]:.0f} MB</span></div>'
     return h
 
-def build_html(status):
-    cpu=status["cpu"]; mem=status["memory"]
-    return HTML.replace("{{HOSTNAME}}", status["network"]["hostname"]) \
-        .replace("{{IP}}", status["network"]["ip"]) \
-        .replace("{{UPTIME}}", f"Uptime: {status['uptime']}") \
-        .replace("{{CPU}}", f"{cpu}") \
+def build_html(s):
+    cpu=s["cpu"]; m=s["mem"]
+    return HTML.replace("{{HOSTNAME}}", s["net"]["hostname"]) \
+        .replace("{{IP}}", s["net"]["ip"]) \
+        .replace("{{UPTIME}}", "Uptime: "+s["uptime"]) \
+        .replace("{{CPU}}", str(cpu)) \
         .replace("{{CPU_C}}", "#69f0ae" if cpu<60 else "#ffeb3b" if cpu<85 else "#ff8a80") \
         .replace("{{CPU_B}}", bc(cpu)) \
-        .replace("{{MEM_P}}", f"{mem['percent']}") \
-        .replace("{{MEM_C}}", "#69f0ae" if mem["percent"]<60 else "#ffeb3b" if mem["percent"]<85 else "#ff8a80") \
-        .replace("{{MEM_B}}", bc(mem["percent"])) \
-        .replace("{{MEM_U}}", f"{mem['used']}") \
-        .replace("{{MEM_T}}", f"{mem['total']}") \
-        .replace("{{DISKS}}", render_disks(status["disks"])) \
-        .replace("{{PROC}}", f"{status['process_count']}") \
-        .replace("{{GPU}}", status["gpu"]) \
-        .replace("{{PROCS}}", render_procs(status["top_processes"])) \
-        .replace("{{TIMESTAMP}}", status["timestamp"])
+        .replace("{{MEM_P}}", str(m["percent"])) \
+        .replace("{{MEM_C}}", "#69f0ae" if m["percent"]<60 else "#ffeb3b" if m["percent"]<85 else "#ff8a80") \
+        .replace("{{MEM_B}}", bc(m["percent"])) \
+        .replace("{{MEM_U}}", str(m["used"])) \
+        .replace("{{MEM_T}}", str(m["total"])) \
+        .replace("{{DISKS}}", render_disks(s["disks"])) \
+        .replace("{{PROC}}", str(s["procs"])) \
+        .replace("{{GPU}}", s["gpu"]) \
+        .replace("{{PROCS}}", render_procs(s["top"])) \
+        .replace("{{TIMESTAMP}}", s["ts"])
 
 # ─── HTTP ───
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        parsed = urlparse(self.path)
-        path = parsed.path
-        qs = parse_qs(parsed.query)
+        p = urlparse(self.path)
+        path = p.path
+        qs = parse_qs(p.query)
 
         if path in ("/", "/status"):
-            status = get_all_status()
-            self.respond(200, "text/html", build_html(status).encode("utf-8"))
+            self.respond(200, "text/html", build_html(get_all_status()).encode("utf-8"))
         elif path == "/api":
             self.json_resp(get_all_status())
         elif path == "/api/screenshot":
             img = take_screenshot()
-            self.json_resp({"ok": bool(img), "image": img or "", "error": None if img else "Failed"})
-        elif path == "/api/files":
-            raw = qs.get("path", ["C:"])[0]
-            p = unquote(raw)
-            print(f"[DEBUG] raw={raw} decoded={repr(p)}")
-            # Normalize path
-            p = p.replace("/", "\\")
-            # Ensure root drives have trailing backslash
-            if len(p) == 2 and p[1] == ":":
-                p += "\\"
-            # Remove trailing backslash for non-root paths
-            elif len(p) > 3 and p.endswith("\\"):
-                p = p.rstrip("\\")
-            print(f"[DEBUG] final={repr(p)}")
-            items, err = list_directory(p)
-            if err:
-                self.json_resp({"error": err, "path": p, "items": []})
-            else:
-                self.json_resp({"path": p, "items": items})
+            self.json_resp({"ok": bool(img), "image": img or ""})
         elif path == "/api/drives":
             self.json_resp({"drives": get_drives()})
+        elif path == "/api/files":
+            # 接收正斜杠或反斜杠路径，统一转成 Windows 路径
+            raw = qs.get("p", ["C:\\"])[0]
+            pth = unquote(raw).replace("/", "\\")
+            if len(pth) == 2 and pth[1] == ":":
+                pth += "\\"
+            items, err = list_directory(pth)
+            if err:
+                self.json_resp({"error": err, "path": pth, "items": []})
+            else:
+                self.json_resp({"path": pth, "items": items})
         elif path == "/api/keepalive":
-            state = qs.get("set", [None])[0]
-            if state == "on":
-                set_keep_screen_alive(True)
-            elif state == "off":
-                set_keep_screen_alive(False)
-            self.json_resp({"keep_alive": keep_screen_alive})
+            s = qs.get("set", [None])[0]
+            if s == "on": set_keep_screen_alive(True)
+            elif s == "off": set_keep_screen_alive(False)
+            self.json_resp({"on": keep_screen_alive})
         else:
             self.send_error(404)
 
     def do_POST(self):
-        parsed = urlparse(self.path)
-        if parsed.path == "/api/terminal":
-            self.handle_terminal()
+        if urlparse(self.path).path == "/api/terminal":
+            cl = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(cl)
+            try:
+                d = json.loads(body)
+                cmd = d.get("cmd", "")
+                if not cmd:
+                    self.json_resp({"error": "No command"})
+                    return
+                if any(f in cmd.lower() for f in ["remove-item","rmdir","del ","format ","shutdown","restart-computer"]):
+                    self.json_resp({"error": "Blocked"})
+                    return
+                r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
+                out = r.stdout
+                if r.stderr: out += ("\n" if out else "") + r.stderr
+                self.json_resp({"output": out or "(no output)"})
+            except subprocess.TimeoutExpired:
+                self.json_resp({"error": "Timeout"})
+            except Exception as e:
+                self.json_resp({"error": str(e)})
         else:
             self.send_error(404)
-
-    def handle_terminal(self):
-        cl = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(cl)
-        try:
-            data = json.loads(body)
-            cmd = data.get("cmd", "")
-            if not cmd:
-                self.json_resp({"error": "No command"})
-                return
-            blocked = ["remove-item", "rmdir", "del ", "format ", "shutdown", "restart-computer"]
-            if any(f in cmd.lower() for f in blocked):
-                self.json_resp({"error": "Blocked for safety"})
-                return
-            r = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", cmd],
-                capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace"
-            )
-            out = r.stdout
-            if r.stderr: out += ("\n" if out else "") + r.stderr
-            self.json_resp({"output": out or "(no output)"})
-        except subprocess.TimeoutExpired:
-            self.json_resp({"error": "Timeout (30s)"})
-        except Exception as e:
-            self.json_resp({"error": str(e)})
 
     def json_resp(self, d):
         self.send_response(200)
@@ -677,18 +543,13 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     net = get_network_info()
-    start_keep_alive()  # Start keep screen alive
-    print(f"""
-==========================================
-  PC Monitor - http://{net['ip']}:{PORT}
-  Screen Keep-Alive: ON
-==========================================
-""")
+    set_keep_screen_alive(True)
+    print(f"\n  PC Monitor: http://{net['ip']}:{PORT}\n")
     server = HTTPServer(("0.0.0.0", PORT), Handler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        set_keep_screen_alive(False)  # Restore on exit
+        set_keep_screen_alive(False)
         print("\nStopped")
         server.server_close()
 
