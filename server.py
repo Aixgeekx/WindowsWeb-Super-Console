@@ -186,6 +186,10 @@ def get_drives():
 
 def list_directory(path):
     """列出目录内容"""
+    if not path or not os.path.exists(path):
+        return None, f"Path not found: {path}"
+    if not os.path.isdir(path):
+        return None, f"Not a directory: {path}"
     items = []
     try:
         for name in os.listdir(path):
@@ -568,6 +572,10 @@ class Handler(BaseHTTPRequestHandler):
             self.json_resp({"ok": bool(img), "image": img or "", "error": None if img else "Failed"})
         elif path == "/api/files":
             p = unquote(qs.get("path", ["C:\\"])[0])
+            # Normalize path
+            p = p.replace("/", "\\")
+            if len(p) == 2 and p[1] == ":":
+                p += "\\"
             items, err = list_directory(p)
             if err:
                 self.json_resp({"error": err, "path": p, "items": []})
