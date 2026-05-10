@@ -9,13 +9,11 @@ import socket
 import os
 import time
 import json
-import re
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote
 import sys
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9999
-BASE_DIR = "C:\\"  # 文件浏览根目录
 
 # ─── 系统信息采集 ───
 
@@ -154,6 +152,21 @@ def take_screenshot():
 
 # ─── 文件浏览 ───
 
+def get_drives():
+    """获取所有磁盘驱动器"""
+    out = run_ps('Get-PSDrive -PSProvider FileSystem | ForEach-Object { "$($_.Name)|$([math]::Round($_.Used/1GB,1))|$([math]::Round($_.Free/1GB,1))" }')
+    drives = []
+    for line in out.split("\n"):
+        line = line.strip()
+        if "|" in line:
+            parts = line.split("|")
+            if len(parts) == 3:
+                name = parts[0]
+                used = parts[1]
+                free = parts[2]
+                drives.append({"name": f"{name}\\", "used": used, "free": free})
+    return drives
+
 def list_directory(path):
     """列出目录内容"""
     items = []
@@ -171,7 +184,6 @@ def list_directory(path):
         return None, "Permission denied"
     except Exception as e:
         return None, str(e)
-    # 文件夹在前，然后按名称排序
     items.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
     return items, None
 
@@ -229,21 +241,15 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;paddi
 .pm{width:70px;text-align:right;color:#90caf9;font-weight:500}
 .ph{font-size:11px;color:#666;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid rgba(255,255,255,.08);padding-bottom:6px;margin-bottom:4px}
 .gpu{font-size:14px;color:#ccc}
-
-/* Tabs */
 .tabs{display:flex;gap:0;margin-bottom:12px;background:rgba(255,255,255,.04);border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,.06)}
 .tab{flex:1;padding:10px;text-align:center;font-size:13px;font-weight:500;cursor:pointer;color:#888;transition:all .2s}
 .tab.active{background:rgba(105,240,174,.15);color:#69f0ae}
 .tab-content{display:none}.tab-content.active{display:block}
-
-/* Screenshot */
 .sbtn{display:inline-flex;align-items:center;gap:6px;padding:10px 18px;border:none;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;color:#fff;background:linear-gradient(135deg,#667eea,#764ba2);margin:4px}
 .sbtn:disabled{opacity:.5}.sbtn:active{transform:scale(.95)}
 .sprev{margin-top:12px;text-align:center;display:none}
 .sprev img{max-width:100%;border-radius:8px;border:1px solid rgba(255,255,255,.1);cursor:pointer}
 .sprev .hint{font-size:12px;color:#888;margin-top:8px}
-
-/* Terminal */
 .tbox{display:none;margin-top:12px;background:#0d0d0d;border-radius:8px;border:1px solid rgba(255,255,255,.1);overflow:hidden}
 .thdr{background:rgba(255,255,255,.06);padding:8px 12px;font-size:12px;color:#888;display:flex;align-items:center;justify-content:space-between}
 .thdr .x{background:none;border:none;color:#888;font-size:18px;cursor:pointer;padding:0 4px}
@@ -253,8 +259,6 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;paddi
 .tp{color:#69f0ae;font-family:monospace;font-size:13px;white-space:nowrap}
 .ti{flex:1;background:none;border:none;color:#fff;font-family:monospace;font-size:13px;outline:none}
 .ts{background:#69f0ae;border:none;color:#000;padding:4px 12px;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer}
-
-/* File Browser */
 .flist{max-height:500px;overflow-y:auto}
 .fitem{display:flex;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:13px;cursor:pointer;transition:background .15s}
 .fitem:hover{background:rgba(255,255,255,.04)}
@@ -263,14 +267,18 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;paddi
 .fname{flex:1;color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fsize{width:80px;text-align:right;color:#888;font-size:12px}
 .fdate{width:100px;text-align:right;color:#666;font-size:12px}
-.fbread{font-size:13px;color:#888;padding:8px 0}
 .fbpath{font-size:12px;color:#666;margin-bottom:8px;font-family:monospace;word-break:break-all}
-
 .footer{position:fixed;bottom:0;left:0;right:0;text-align:center;padding:12px;background:rgba(10,10,26,.95);backdrop-filter:blur(10px);border-top:1px solid rgba(255,255,255,.06);font-size:12px;color:#666}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 .ld{display:inline-block;width:6px;height:6px;background:#00c853;border-radius:50%;margin-right:4px;animation:pulse 2s infinite}
 @keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
 .loading{animation:spin 1s linear infinite;display:inline-block}
+.drive-item{display:flex;align-items:center;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:14px;cursor:pointer}
+.drive-item:last-child{border:none}
+.drive-item:hover{background:rgba(255,255,255,.04)}
+.drive-icon{font-size:20px;margin-right:10px}
+.drive-name{font-weight:600;color:#69f0ae}
+.drive-info{margin-left:auto;font-size:12px;color:#888}
 </style>
 </head>
 <body>
@@ -280,7 +288,6 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;paddi
   <div class="sub">{{UPTIME}}</div>
 </div>
 
-<!-- Tabs -->
 <div class="tabs">
   <div class="tab active" onclick="switchTab('status')">Status</div>
   <div class="tab" onclick="switchTab('files')">Files</div>
@@ -307,8 +314,8 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;paddi
 <div class="tab-content" id="tab-files">
   <div class="card">
     <div class="ct">FILE BROWSER</div>
-    <div class="fbpath" id="fbPath">{{FILE_PATH}}</div>
-    <div class="flist" id="fileList">{{FILE_LIST}}</div>
+    <div class="fbpath" id="fbPath">All Drives</div>
+    <div class="flist" id="fileList"><div class="fbread">Loading...</div></div>
   </div>
 </div>
 
@@ -330,24 +337,23 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;paddi
 <div class="footer"><span class="ld"></span> Live &middot; <span id="ts">{{TIMESTAMP}}</span></div>
 
 <script>
-// Tab switching
 function switchTab(name){
   document.querySelectorAll('.tab').forEach((t,i)=>{t.classList.toggle('active',['status','files','tools'][i]===name)});
   document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
   document.getElementById('tab-'+name).classList.add('active');
 }
 
-// Auto-refresh: only when page is visible
-let lastRefresh=0;
+let refreshTimer=null;
 function scheduleRefresh(){
-  if(document.hidden)return;
-  const now=Date.now();
-  if(now-lastRefresh>3500){lastRefresh=now;setTimeout(()=>location.reload(),4000)}
+  clearTimeout(refreshTimer);
+  if(!document.hidden){
+    refreshTimer=setTimeout(()=>{if(!document.hidden)location.reload()},6000)
+  }
 }
-document.addEventListener('visibilitychange',()=>{if(!document.hidden)scheduleRefresh()});
-setTimeout(scheduleRefresh,4000);
+document.addEventListener('visibilitychange',scheduleRefresh);
+window.addEventListener('focus',scheduleRefresh);
+scheduleRefresh();
 
-// Screenshot
 async function takeSS(){
   const btn=document.getElementById('ssBtn'),prev=document.getElementById('ssPrev'),img=document.getElementById('ssImg');
   btn.disabled=true;btn.innerHTML='<span class="loading">&#8635;</span> Capturing...';
@@ -366,7 +372,6 @@ function dlSS(){
   a.click();
 }
 
-// Terminal
 let termVis=false,cmdHist=[],histIdx=-1;
 function toggleTerm(){
   termVis=!termVis;
@@ -393,26 +398,66 @@ document.getElementById('termIn').addEventListener('keydown',function(e){
 });
 
 // File browser
-function browseDir(path){fetch('/api/files?path='+encodeURIComponent(path)).then(r=>r.json()).then(d=>{if(d.error){alert(d.error);return}document.getElementById('fbPath').textContent=d.path;renderFiles(d.items,d.path)})}
-function renderFiles(items,path){
-  const c=document.getElementById('fileList');let h='';
-  if(path!=='C:\\'){
-    const parent=path.replace(/[\\\/][^\\\/]+[\\\/]?$/,'')||'C:\\';
-    h+='<div class="fitem" onclick="browseDir(\''+esc(parent)+'\')"><span class="ficon">&#128194;</span><span class="fname">..</span></div>';
+let currentPath = null;
+
+async function loadDrives(){
+  try{
+    const r = await fetch('/api/drives');
+    const d = await r.json();
+    const c = document.getElementById('fileList');
+    let h = '';
+    d.drives.forEach(dr => {
+      h += '<div class="drive-item" onclick="browseDir(\''+esc(dr.name)+'\')">';
+      h += '<span class="drive-icon">&#128190;</span>';
+      h += '<span class="drive-name">'+dr.name+'</span>';
+      h += '<span class="drive-info">Used: '+dr.used+' GB | Free: '+dr.free+' GB</span>';
+      h += '</div>';
+    });
+    c.innerHTML = h;
+    document.getElementById('fbPath').textContent = 'All Drives';
+    currentPath = null;
+  }catch(e){console.error(e)}
+}
+
+function browseDir(path){
+  currentPath = path;
+  fetch('/api/files?path='+encodeURIComponent(path)).then(r=>r.json()).then(d=>{
+    if(d.error){alert(d.error);return}
+    document.getElementById('fbPath').textContent = d.path;
+    renderFiles(d.items, d.path);
+  });
+}
+
+function renderFiles(items, path){
+  const c = document.getElementById('fileList');
+  let h = '';
+  // Back button
+  if(path && path !== currentPath){
+    const parent = path.replace(/[\\\/][^\\\/]+[\\\/]?$/, '') || null;
+    if(parent){
+      h += '<div class="fitem" onclick="browseDir(\''+esc(parent)+'\')"><span class="ficon">&#128194;</span><span class="fname">..</span></div>';
+    } else {
+      h += '<div class="fitem" onclick="loadDrives()"><span class="ficon">&#128194;</span><span class="fname">.. Back to Drives</span></div>';
+    }
+  } else {
+    h += '<div class="fitem" onclick="loadDrives()"><span class="ficon">&#128194;</span><span class="fname">.. Back to Drives</span></div>';
   }
-  items.forEach(i=>{
-    const full=path.endsWith('\\')?path+i.name:path+'\\'+i.name;
+  items.forEach(i => {
+    const full = path.endsWith('\\') ? path + i.name : path + '\\' + i.name;
     if(i.is_dir){
-      h+='<div class="fitem" onclick="browseDir(\''+esc(full)+'\')"><span class="ficon">&#128193;</span><span class="fname">'+i.name+'</span><span class="fdate">'+i.mtime+'</span></div>';
-    }else{
-      const sz=i.size>1048576?(i.size/1048576).toFixed(1)+'MB':i.size>1024?(i.size/1024).toFixed(0)+'KB':i.size+'B';
-      h+='<div class="fitem"><span class="ficon">&#128196;</span><span class="fname">'+i.name+'</span><span class="fsize">'+sz+'</span><span class="fdate">'+i.mtime+'</span></div>';
+      h += '<div class="fitem" onclick="browseDir(\''+esc(full)+'\')"><span class="ficon">&#128193;</span><span class="fname">'+i.name+'</span><span class="fdate">'+i.mtime+'</span></div>';
+    } else {
+      const sz = i.size>1048576 ? (i.size/1048576).toFixed(1)+'MB' : i.size>1024 ? (i.size/1024).toFixed(0)+'KB' : i.size+'B';
+      h += '<div class="fitem"><span class="ficon">&#128196;</span><span class="fname">'+i.name+'</span><span class="fsize">'+sz+'</span><span class="fdate">'+i.mtime+'</span></div>';
     }
   });
-  c.innerHTML=h;
+  c.innerHTML = h;
 }
+
 function esc(s){return s.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}
-browseDir('C:\\');
+
+// Load drives on page load
+loadDrives();
 </script>
 </body>
 </html>"""
@@ -433,24 +478,7 @@ def render_procs(procs):
         h+=f'<div class="pr"><span class="pn">{p["name"]}</span><span class="pc">{p["cpu"]:.1f}s</span><span class="pm">{p["mem_mb"]:.0f} MB</span></div>'
     return h
 
-def render_file_items(items, path):
-    h = ""
-    if path != "C:\\":
-        parent = path.replace("\\", "\\", 1)
-        parent = "\\".join(parent.rstrip("\\").split("\\")[:-1]) + "\\"
-        if not parent or parent == "\\": parent = "C:\\"
-        h += f'<div class="fitem" onclick="browseDir(\'{parent.replace(chr(92), chr(92)+chr(92))}\')"><span class="ficon">&#128194;</span><span class="fname">..</span></div>'
-    for i in items:
-        full = os.path.join(path, i["name"])
-        icon = "&#128193;" if i["is_dir"] else "&#128196;"
-        if i["is_dir"]:
-            h += f'<div class="fitem" onclick="browseDir(\'{full.replace(chr(92), chr(92)+chr(92))}\')"><span class="ficon">{icon}</span><span class="fname">{i["name"]}</span><span class="fdate">{i["mtime"]}</span></div>'
-        else:
-            sz = f'{i["size"]/1048576:.1f}MB' if i["size"]>1048576 else f'{i["size"]/1024:.0f}KB' if i["size"]>1024 else f'{i["size"]}B'
-            h += f'<div class="fitem"><span class="ficon">{icon}</span><span class="fname">{i["name"]}</span><span class="fsize">{sz}</span><span class="fdate">{i["mtime"]}</span></div>'
-    return h
-
-def build_html(status, file_items=None, file_path="C:\\"):
+def build_html(status):
     cpu=status["cpu"]; mem=status["memory"]
     return HTML.replace("{{HOSTNAME}}", status["network"]["hostname"]) \
         .replace("{{IP}}", status["network"]["ip"]) \
@@ -467,8 +495,6 @@ def build_html(status, file_items=None, file_path="C:\\"):
         .replace("{{PROC}}", f"{status['process_count']}") \
         .replace("{{GPU}}", status["gpu"]) \
         .replace("{{PROCS}}", render_procs(status["top_processes"])) \
-        .replace("{{FILE_PATH}}", file_path) \
-        .replace("{{FILE_LIST}}", render_file_items(file_items or [], file_path) if file_items is not None else '<div class="fbread">Loading...</div>') \
         .replace("{{TIMESTAMP}}", status["timestamp"])
 
 # ─── HTTP ───
@@ -481,8 +507,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path in ("/", "/status"):
             status = get_all_status()
-            items, err = list_directory("C:\\")
-            self.respond(200, "text/html", build_html(status, items, "C:\\").encode("utf-8"))
+            self.respond(200, "text/html", build_html(status).encode("utf-8"))
         elif path == "/api":
             self.json_resp(get_all_status())
         elif path == "/api/screenshot":
@@ -495,6 +520,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.json_resp({"error": err, "path": p, "items": []})
             else:
                 self.json_resp({"path": p, "items": items})
+        elif path == "/api/drives":
+            self.json_resp({"drives": get_drives()})
         else:
             self.send_error(404)
 
