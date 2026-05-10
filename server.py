@@ -411,7 +411,14 @@ async function takeSS(){
   try{
     const r=await fetch('/api/screenshot');
     const d=await r.json();
-    if(d.ok){img.src='data:image/png;base64,'+d.image;prev.style.display='block'}
+    if(d.ok){
+      img.src='data:image/png;base64,'+d.image;
+      prev.style.display='block';
+      // Auto open fullscreen
+      document.getElementById('ssFullImg').src=img.src;
+      document.getElementById('ssFull').style.display='block';
+      document.body.style.overflow='hidden';
+    }
     else alert('Failed: '+(d.error||'Unknown'));
   }catch(e){alert('Error: '+e.message)}
   btn.disabled=false;btn.innerHTML='Screenshot';
@@ -484,11 +491,14 @@ async function loadDrives(){
 
 function browseDir(path){
   currentPath = path;
-  fetch('/api/files?path='+encodeURIComponent(path)).then(r=>r.json()).then(d=>{
+  // Use raw path without extra encoding
+  const url = '/api/files?path=' + encodeURIComponent(path);
+  console.log('browseDir:', path, 'url:', url);
+  fetch(url).then(r=>r.json()).then(d=>{
     if(d.error){alert(d.error);return}
     document.getElementById('fbPath').textContent = d.path;
     renderFiles(d.items, d.path);
-  });
+  }).catch(e=>alert('Network error: '+e.message));
 }
 
 function renderFiles(items, path){
@@ -517,7 +527,9 @@ function renderFiles(items, path){
   c.innerHTML = h;
 }
 
-function esc(s){return s.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}
+function esc(s){return s.replace(/\\/g,'/').replace(/'/g,"\\'")}
+// Convert forward slashes back to backslashes for Windows paths
+function toWin(p){return p.replace(/\//g,'\\')}
 
 // Keep alive toggle
 let kaState=true;
@@ -588,11 +600,18 @@ class Handler(BaseHTTPRequestHandler):
             img = take_screenshot()
             self.json_resp({"ok": bool(img), "image": img or "", "error": None if img else "Failed"})
         elif path == "/api/files":
-            p = unquote(qs.get("path", ["C:\\"])[0])
+            raw = qs.get("path", ["C:"])[0]
+            p = unquote(raw)
+            print(f"[DEBUG] raw={raw} decoded={repr(p)}")
             # Normalize path
             p = p.replace("/", "\\")
+            # Ensure root drives have trailing backslash
             if len(p) == 2 and p[1] == ":":
                 p += "\\"
+            # Remove trailing backslash for non-root paths
+            elif len(p) > 3 and p.endswith("\\"):
+                p = p.rstrip("\\")
+            print(f"[DEBUG] final={repr(p)}")
             items, err = list_directory(p)
             if err:
                 self.json_resp({"error": err, "path": p, "items": []})
