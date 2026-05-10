@@ -123,16 +123,33 @@ def get_gpu_info():
     """)
     return out
 
+# ─── 保持屏幕唤醒 ───
+
+keep_screen_alive = False
+
+def set_keep_screen_alive(enable):
+    global keep_screen_alive
+    keep_screen_alive = enable
+    # ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+    flag = "0x80000000 | 0x00000001 | 0x00000002" if enable else "0x80000000"
+    run_ps(f'Add-Type @"using System.Runtime.InteropServices; public class WinAPI {{ [DllImport(\"kernel32.dll\")] public static extern uint SetThreadExecutionState(uint esFlags); }}"; [WinAPI]::SetThreadExecutionState({flag})')
+    return keep_screen_alive
+
+def start_keep_alive():
+    """启动时自动保持屏幕唤醒"""
+    set_keep_screen_alive(True)
+
 # ─── 截屏 ───
 
 def take_screenshot():
     ps_script = '''
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
-    $screen = [System.Windows.Forms.Screen]::PrimaryScreen
-    $bitmap = New-Object System.Drawing.Bitmap($screen.Bounds.Width, $screen.Bounds.Height)
+    # Get full virtual screen (all monitors)
+    $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+    $bitmap = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    $graphics.CopyFromScreen($screen.Bounds.Location, [System.Drawing.Point]::Empty, $screen.Bounds.Size)
+    $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
     $ms = New-Object System.IO.MemoryStream
     $bitmap.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
     [Convert]::ToBase64String($ms.ToArray())
@@ -326,6 +343,13 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;paddi
     <button class="sbtn" onclick="takeSS()" id="ssBtn">Screenshot</button>
     <button class="sbtn" style="background:linear-gradient(135deg,#11998e,#38ef7d)" onclick="toggleTerm()">PowerShell</button>
   </div>
+  <div class="card">
+    <div class="ct">SCREEN KEEP-ALIVE</div>
+    <div style="display:flex;align-items:center;gap:12px;justify-content:center">
+      <span id="kaStatus" style="color:#69f0ae;font-weight:500">ON</span>
+      <button class="sbtn" style="background:#444;padding:8px 16px;font-size:12px" onclick="toggleKeepAlive()">Toggle</button>
+    </div>
+  </div>
   <div class="sprev" id="ssPrev"><div class="card"><div class="ct">SCREENSHOT</div><img id="ssImg" src="" onclick="dlSS()"><div class="hint">Tap to save</div></div></div>
   <div class="tbox" id="termBox">
     <div class="thdr"><span>PowerShell</span><button class="x" onclick="toggleTerm()">&times;</button></div>
@@ -347,7 +371,25 @@ let refreshTimer=null;
 function scheduleRefresh(){
   clearTimeout(refreshTimer);
   if(!document.hidden){
-    refreshTimer=setTimeout(()=>{if(!document.hidden)location.reload()},6000)
+    refreshTimer=setTimeout(async()=>{
+      if(document.hidden)return;
+      try{
+        const r=await fetch('/api');
+        const d=await r.json();
+        // Update CPU
+        document.querySelector('#tab-status .row .card:first-child .bnum').innerHTML=d.cpu+'<span class="u">%</span>';
+        // Update MEM
+        document.querySelector('#tab-status .row .card:last-child .bnum').innerHTML=d.memory.percent+'<span class="u">%</span>';
+        document.querySelector('#tab-status .row .card:last-child .si').textContent=d.memory.used+' / '+d.memory.total+' GB';
+        // Update timestamp
+        document.getElementById('ts').textContent=d.timestamp;
+        // Update uptime
+        document.querySelector('.hdr .sub:last-child').textContent='Uptime: '+d.uptime;
+        // Update process count
+        document.querySelector('#tab-status .row:nth-child(4) .card:first-child .bnum').textContent=d.process_count;
+      }catch(e){}
+      scheduleRefresh();
+    },3000)
   }
 }
 document.addEventListener('visibilitychange',scheduleRefresh);
@@ -456,6 +498,17 @@ function renderFiles(items, path){
 
 function esc(s){return s.replace(/\\/g,'\\\\').replace(/'/g,"\\'")}
 
+// Keep alive toggle
+let kaState=true;
+async function toggleKeepAlive(){
+  kaState=!kaState;
+  try{
+    await fetch('/api/keepalive?set='+(kaState?'on':'off'));
+    document.getElementById('kaStatus').textContent=kaState?'ON':'OFF';
+    document.getElementById('kaStatus').style.color=kaState?'#69f0ae':'#ff8a80';
+  }catch(e){}
+}
+
 // Load drives on page load
 loadDrives();
 </script>
@@ -522,6 +575,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.json_resp({"path": p, "items": items})
         elif path == "/api/drives":
             self.json_resp({"drives": get_drives()})
+        elif path == "/api/keepalive":
+            state = qs.get("set", [None])[0]
+            if state == "on":
+                set_keep_screen_alive(True)
+            elif state == "off":
+                set_keep_screen_alive(False)
+            self.json_resp({"keep_alive": keep_screen_alive})
         else:
             self.send_error(404)
 
@@ -574,15 +634,18 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     net = get_network_info()
+    start_keep_alive()  # Start keep screen alive
     print(f"""
 ==========================================
   PC Monitor - http://{net['ip']}:{PORT}
+  Screen Keep-Alive: ON
 ==========================================
 """)
     server = HTTPServer(("0.0.0.0", PORT), Handler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
+        set_keep_screen_alive(False)  # Restore on exit
         print("\nStopped")
         server.server_close()
 
