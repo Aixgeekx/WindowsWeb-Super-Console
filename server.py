@@ -145,16 +145,22 @@ def take_screenshot():
     ps_script = '''
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
-    # Get full virtual screen (all monitors)
     $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
     $bitmap = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+    # Convert to RGB to avoid transparency issues
+    $rgb = New-Object System.Drawing.Bitmap($bitmap.Width, $bitmap.Height, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+    $g2 = [System.Drawing.Graphics]::FromImage($rgb)
+    $g2.DrawImage($bitmap, 0, 0)
     $ms = New-Object System.IO.MemoryStream
-    $bitmap.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
-    [Convert]::ToBase64String($ms.ToArray())
+    $rgb.Save($ms, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+    $base64 = [Convert]::ToBase64String($ms.ToArray())
     $graphics.Dispose()
     $bitmap.Dispose()
+    $g2.Dispose()
+    $rgb.Dispose()
+    $base64
     '''
     try:
         r = subprocess.run(
@@ -411,14 +417,7 @@ async function takeSS(){
   try{
     const r=await fetch('/api/screenshot');
     const d=await r.json();
-    if(d.ok){
-      img.src='data:image/png;base64,'+d.image;
-      prev.style.display='block';
-      // Auto open fullscreen
-      document.getElementById('ssFullImg').src=img.src;
-      document.getElementById('ssFull').style.display='block';
-      document.body.style.overflow='hidden';
-    }
+    if(d.ok){img.src='data:image/jpeg;base64,'+d.image;prev.style.display='block'}
     else alert('Failed: '+(d.error||'Unknown'));
   }catch(e){alert('Error: '+e.message)}
   btn.disabled=false;btn.innerHTML='Screenshot';
@@ -426,7 +425,7 @@ async function takeSS(){
 function dlSS(){
   const a=document.createElement('a');
   a.href=document.getElementById('ssImg').src;
-  a.download='screenshot_'+new Date().toISOString().slice(0,19).replace(/[T:]/g,'-')+'.png';
+  a.download='screenshot_'+new Date().toISOString().slice(0,19).replace(/[T:]/g,'-')+'.jpg';
   a.click();
 }
 function openFullSS(){
