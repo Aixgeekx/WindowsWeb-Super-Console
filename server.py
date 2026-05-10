@@ -271,6 +271,10 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;paddi
 .sprev{margin-top:12px;text-align:center;display:none}
 .sprev img{max-width:100%;border-radius:8px;border:1px solid rgba(255,255,255,.1);cursor:pointer}
 .sprev .hint{font-size:12px;color:#888;margin-top:8px}
+/* Fullscreen preview */
+.ss-full{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.95);z-index:9999;overflow:auto;-webkit-overflow-scrolling:touch}
+.ss-full img{display:block;margin:10px auto;max-width:98vw;max-height:98vh;object-fit:contain}
+.ss-full .close{position:fixed;top:10px;right:16px;color:#fff;font-size:28px;cursor:pointer;z-index:10000;background:rgba(0,0,0,.5);width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center}
 .tbox{display:none;margin-top:12px;background:#0d0d0d;border-radius:8px;border:1px solid rgba(255,255,255,.1);overflow:hidden}
 .thdr{background:rgba(255,255,255,.06);padding:8px 12px;font-size:12px;color:#888;display:flex;align-items:center;justify-content:space-between}
 .thdr .x{background:none;border:none;color:#888;font-size:18px;cursor:pointer;padding:0 4px}
@@ -354,7 +358,7 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;paddi
       <button class="sbtn" style="background:#444;padding:8px 16px;font-size:12px" onclick="toggleKeepAlive()">Toggle</button>
     </div>
   </div>
-  <div class="sprev" id="ssPrev"><div class="card"><div class="ct">SCREENSHOT</div><img id="ssImg" src="" onclick="dlSS()"><div class="hint">Tap to save</div></div></div>
+  <div class="sprev" id="ssPrev"><div class="card"><div class="ct">SCREENSHOT</div><img id="ssImg" src=""><div class="hint">Tap image for fullscreen &middot; Long press to save</div></div></div>
   <div class="tbox" id="termBox">
     <div class="thdr"><span>PowerShell</span><button class="x" onclick="toggleTerm()">&times;</button></div>
     <div class="tout" id="termOut">Ready.\n\n</div>
@@ -362,6 +366,7 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;paddi
   </div>
 </div>
 
+<div class="ss-full" id="ssFull" onclick="closeFullSS()"><span class="close">&times;</span><img id="ssFullImg"></div>
 <div class="footer"><span class="ld"></span> Live &middot; <span id="ts">{{TIMESTAMP}}</span></div>
 
 <script>
@@ -417,6 +422,18 @@ function dlSS(){
   a.download='screenshot_'+new Date().toISOString().slice(0,19).replace(/[T:]/g,'-')+'.png';
   a.click();
 }
+function openFullSS(){
+  const src=document.getElementById('ssImg').src;
+  if(!src)return;
+  document.getElementById('ssFullImg').src=src;
+  document.getElementById('ssFull').style.display='block';
+  document.body.style.overflow='hidden';
+}
+function closeFullSS(){
+  document.getElementById('ssFull').style.display='none';
+  document.body.style.overflow='';
+}
+document.getElementById('ssImg').addEventListener('click',openFullSS);
 
 let termVis=false,cmdHist=[],histIdx=-1;
 function toggleTerm(){
