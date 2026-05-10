@@ -208,8 +208,9 @@ HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>PC Monitor</title>
 <style>
+@font-face{font-family:'Maple';src:url('/font.ttf') format('truetype');font-weight:normal;font-style:normal}
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;padding:16px;padding-bottom:80px}
+body{font-family:'Maple',-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;padding:16px;padding-bottom:80px}
 .hdr{text-align:center;padding:20px 0 16px;border-bottom:1px solid rgba(255,255,255,.08);margin-bottom:16px}
 .hdr h1{font-size:20px;font-weight:600}
 .hdr .sub{font-size:13px;color:#888;margin-top:4px}
@@ -494,6 +495,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.json_resp({"error": err, "path": pth, "items": []})
             else:
                 self.json_resp({"path": pth, "items": items})
+        elif path == "/font.ttf":
+            try:
+                with open(os.path.join(os.path.dirname(__file__), "font.ttf"), "rb") as f:
+                    data = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "font/ttf")
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                self.wfile.write(data)
+            except:
+                self.send_error(404)
         elif path == "/api/keepalive":
             s = qs.get("set", [None])[0]
             if s == "on": set_keep_screen_alive(True)
