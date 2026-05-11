@@ -14,6 +14,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 import sys
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9999
+PASSWORD = "999"
 
 # ─── 系统信息采集 ───
 
@@ -472,11 +473,93 @@ def build_html(s):
 
 # ─── HTTP ───
 
+# 简单的登录会话管理
+logged_in_ips = {}
+SESSION_TIMEOUT = 3600  # 1小时超时
+
+
 class Handler(BaseHTTPRequestHandler):
+    def get_client_ip(self):
+        return self.client_address[0]
+
+    def is_logged_in(self):
+        ip = self.get_client_ip()
+        if ip in logged_in_ips:
+            if time.time() - logged_in_ips[ip] < SESSION_TIMEOUT:
+                return True
+            else:
+                del logged_in_ips[ip]
+        return False
+
+    def do_login(self):
+        ip = self.get_client_ip()
+        logged_in_ips[ip] = time.time()
+
+    def check_auth(self):
+        """检查是否已认证，未认证则返回登录页面"""
+        if self.is_logged_in():
+            return True
+
+        # 显示登录页面
+        login_html = '''<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Login</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;display:flex;justify-content:center;align-items:center;min-height:100vh}
+.login-box{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:32px;width:320px;text-align:center}
+.login-box h1{font-size:24px;margin-bottom:8px}
+.login-box p{font-size:13px;color:#888;margin-bottom:24px}
+.login-box input{width:100%;padding:12px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:8px;color:#fff;font-size:16px;outline:none;margin-bottom:16px}
+.login-box input:focus{border-color:#69f0ae}
+.login-box button{width:100%;padding:12px;background:linear-gradient(135deg,#667eea,#764ba2);border:none;border-radius:8px;color:#fff;font-size:16px;font-weight:600;cursor:pointer}
+.login-box button:active{transform:scale(.98)}
+.error{color:#ff8a80;font-size:13px;margin-bottom:12px;display:none}
+</style>
+</head>
+<body>
+<div class="login-box">
+  <h1>PC Monitor</h1>
+  <p>请输入密码访问</p>
+  <div class="error" id="err">密码错误</div>
+  <input type="password" id="pwd" placeholder="密码" autofocus>
+  <button onclick="login()">登录</button>
+</div>
+<script>
+document.getElementById("pwd").addEventListener("keydown",function(e){if(e.key=="Enter")login()});
+function login(){
+  var pwd=document.getElementById("pwd").value;
+  fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:pwd})})
+  .then(r=>r.json()).then(d=>{
+    if(d.ok)location.reload();
+    else{document.getElementById("err").style.display="block";document.getElementById("pwd").value="";document.getElementById("pwd").focus()}
+  }).catch(()=>{document.getElementById("err").textContent="网络错误";document.getElementById("err").style.display="block"})
+}
+</script>
+</body>
+</html>'''
+        self.respond(200, "text/html", login_html.encode("utf-8"))
+        return False
+
     def do_GET(self):
+        # 登录API不需要认证
         p = urlparse(self.path)
         path = p.path
         qs = parse_qs(p.query)
+
+        # 登录页面始终可访问
+        if path in ("/", "/status"):
+            if not self.check_auth():
+                return
+
+        # API也需要认证
+        if path.startswith("/api/") and path != "/api/login":
+            if not self.is_logged_in():
+                self.json_resp({"error": "Unauthorized"}, 401)
+                return
 
         if path in ("/", "/status"):
             self.respond(200, "text/html", build_html(get_all_status()).encode("utf-8"))
@@ -518,7 +601,30 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
-        if urlparse(self.path).path == "/api/terminal":
+        path = urlparse(self.path).path
+        
+        # 登录接口不需要认证
+        if path == "/api/login":
+            cl = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(cl)
+            try:
+                d = json.loads(body)
+                pwd = d.get("password", "")
+                if pwd == PASSWORD:
+                    self.do_login()
+                    self.json_resp({"ok": True})
+                else:
+                    self.json_resp({"ok": False, "error": "密码错误"})
+            except:
+                self.json_resp({"ok": False, "error": "请求错误"})
+            return
+
+        # 其他POST请求需要认证
+        if not self.is_logged_in():
+            self.json_resp({"error": "Unauthorized"}, 401)
+            return
+
+        if path == "/api/terminal":
             cl = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(cl)
             try:
@@ -541,8 +647,8 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
-    def json_resp(self, d):
-        self.send_response(200)
+    def json_resp(self, d, code=200):
+        self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(d, ensure_ascii=False).encode("utf-8"))

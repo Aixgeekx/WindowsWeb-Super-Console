@@ -1,0 +1,51 @@
+name: Build and Release EXE
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'server.py'
+  workflow_dispatch:  # 允许手动触发
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.13'
+    
+    - name: Install PyInstaller
+      run: pip install pyinstaller
+    
+    - name: Build EXE
+      run: |
+        pyinstaller --onefile --name "PCMonitor" --icon=NONE server.py
+    
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: v${{ github.run_number }}
+        release_name: PC Monitor v${{ github.run_number }}
+        draft: false
+        prerelease: false
+    
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./dist/PCMonitor.exe
+        asset_name: PCMonitor.exe
+        asset_content_type: application/octet-stream
