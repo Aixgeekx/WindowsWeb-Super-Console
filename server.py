@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 内网电脑状态监控
 用法: python server.py [端口号，默认9999]
@@ -12,6 +12,11 @@ import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote
 import sys
+try:
+    import psutil
+    HAS_PSUTIL = True
+except:
+    HAS_PSUTIL = False
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9999
 PASSWORD = "999"
@@ -112,8 +117,13 @@ def get_top_processes(n=8):
     return procs
 
 def get_gpu_info():
-    out = run_ps('try { (Get-CimInstance Win32_VideoController | Select-Object -First 1).Name } catch { "N/A" }')
-    return out
+    out = run_ps('''
+        try {
+            $gpus = Get-CimInstance Win32_VideoController | Where-Object { $_.Name -notmatch 'Oray|Remote|Virtual|Display|Basic' }
+            if ($gpus) { $gpus[0].Name } else { (Get-CimInstance Win32_VideoController | Select-Object -First 1).Name }
+        } catch { "N/A" }
+    ''')
+    return out if out else "N/A"
 
 # ─── 保持屏幕唤醒 ───
 
@@ -161,26 +171,68 @@ def get_drives():
                 drives.append({"letter": parts[0], "used": parts[1], "free": parts[2]})
     return drives
 
+def get_quick_access():
+    """获取快速访问文件夹"""
+    user = os.path.expanduser("~")
+    return [
+        {"name": "桌面", "path": os.path.join(user, "Desktop")},
+        {"name": "下载", "path": os.path.join(user, "Downloads")},
+        {"name": "文档", "path": os.path.join(user, "Documents")},
+        {"name": "图片", "path": os.path.join(user, "Pictures")},
+        {"name": "视频", "path": os.path.join(user, "Videos")},
+        {"name": "音乐", "path": os.path.join(user, "Music")},
+    ]
+
 def list_directory(path):
     if not os.path.isdir(path):
         return None, f"Not found: {path}"
     items = []
     try:
-        for name in os.listdir(path):
-            full = os.path.join(path, name)
-            try:
-                is_dir = os.path.isdir(full)
-                size = 0 if is_dir else os.path.getsize(full)
-                mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(full)))
-                items.append({"name": name, "dir": is_dir, "size": size, "time": mtime})
-            except:
-                items.append({"name": name, "dir": False, "size": 0, "time": "?"})
+        with os.scandir(path) as entries:
+            for entry in entries:
+                try:
+                    is_dir = entry.is_dir()
+                    stat = entry.stat()
+                    size = 0 if is_dir else stat.st_size
+                    mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(stat.st_mtime))
+                    ext = os.path.splitext(entry.name)[1].lower() if not is_dir else ""
+                    items.append({"name": entry.name, "dir": is_dir, "size": size, "time": mtime, "ext": ext})
+                except:
+                    items.append({"name": entry.name, "dir": False, "size": 0, "time": "?", "ext": ""})
     except PermissionError:
         return [], "Access denied"
     except Exception as e:
         return [], str(e)
     items.sort(key=lambda x: (not x["dir"], x["name"].lower()))
     return items, None
+
+def create_folder(path):
+    """创建文件夹"""
+    try:
+        os.makedirs(path, exist_ok=True)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+def delete_item(path):
+    """删除文件或文件夹"""
+    try:
+        if os.path.isdir(path):
+            import shutil
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+def rename_item(old_path, new_path):
+    """重命名文件或文件夹"""
+    try:
+        os.rename(old_path, new_path)
+        return True, None
+    except Exception as e:
+        return False, str(e)
 
 # ─── 缓存 ───
 
@@ -270,6 +322,36 @@ body{font-family:'Maple',-apple-system,sans-serif;background:#0a0a1a;color:#e0e0
 .drive-icon{font-size:20px;margin-right:10px}
 .drive-name{font-weight:600;color:#69f0ae;font-size:15px}
 .drive-info{margin-left:auto;font-size:12px;color:#888}
+/* Explorer styles */
+.exp-toolbar{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+.exp-btn{padding:6px 10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:6px;color:#ccc;font-size:14px;cursor:pointer;transition:all .15s}
+.exp-btn:hover{background:rgba(255,255,255,.1)}
+.exp-btn:active{transform:scale(.95)}
+.exp-btn.disabled{opacity:.4;cursor:not-allowed}
+.exp-addr{display:flex;flex:1;min-width:150px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:6px;overflow:hidden}
+.exp-addr input{flex:1;background:none;border:none;color:#e0e0e0;padding:6px 10px;font-size:13px;outline:none;font-family:monospace}
+.exp-addr button{background:rgba(105,240,174,.2);border:none;color:#69f0ae;padding:6px 12px;cursor:pointer}
+.exp-search{display:flex;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:6px;overflow:hidden}
+.exp-search input{width:120px;background:none;border:none;color:#e0e0e0;padding:6px 10px;font-size:13px;outline:none}
+.exp-quick{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.exp-quick-item{padding:6px 12px;background:rgba(105,240,174,.1);border:1px solid rgba(105,240,174,.2);border-radius:16px;font-size:12px;color:#69f0ae;cursor:pointer;transition:all .15s}
+.exp-quick-item:hover{background:rgba(105,240,174,.2)}
+.exp-header{display:flex;align-items:center;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.1);font-size:11px;color:#666;text-transform:uppercase}
+.exp-header .exp-hname{flex:1}
+.exp-header .exp-hsize{width:80px;text-align:right}
+.exp-header .exp-htime{width:120px;text-align:right}
+.exp-item{display:flex;align-items:center;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.04);cursor:pointer;transition:background .15s;border-radius:4px}
+.exp-item:hover{background:rgba(255,255,255,.06)}
+.exp-item.selected{background:rgba(105,240,174,.15)}
+.exp-item .exp-icon{width:24px;text-align:center;font-size:16px;margin-right:8px}
+.exp-item .exp-name{flex:1;color:#ccc;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.exp-item .exp-size{width:80px;text-align:right;color:#888;font-size:12px}
+.exp-item .exp-time{width:120px;text-align:right;color:#666;font-size:12px}
+.exp-context{position:fixed;background:rgba(30,30,50,.95);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:4px 0;min-width:160px;z-index:1000;display:none;box-shadow:0 4px 20px rgba(0,0,0,.5)}
+.exp-context-item{padding:8px 16px;font-size:13px;color:#ccc;cursor:pointer;transition:background .15s}
+.exp-context-item:hover{background:rgba(105,240,174,.15)}
+.exp-context-divider{height:1px;background:rgba(255,255,255,.1);margin:4px 0}
+.exp-status{display:flex;justify-content:space-between;padding:8px 10px;font-size:12px;color:#888;border-top:1px solid rgba(255,255,255,.06);margin-top:8px}
 </style>
 </head>
 <body>
@@ -298,16 +380,54 @@ body{font-family:'Maple',-apple-system,sans-serif;background:#0a0a1a;color:#e0e0
     <div class="card"><div class="ct">PROCS</div><div class="bnum" style="color:#ce93d8">{{PROC}}</div></div>
     <div class="card"><div class="ct">GPU</div><div class="gpu">{{GPU}}</div></div>
   </div>
-  <div class="card"><div class="ct">TOP PROCESSES</div><div class="pr ph"><span class="pn">Name</span><span class="pc">CPU</span><span class="pm">Memory</span></div>{{PROCS}}</div>
+  <div class="card" id="procCard">
+    <div class="ct">进程管理 <span style="font-size:11px;color:#888">(右键结束进程)</span></div>
+    <div style="margin-bottom:10px;display:flex;gap:8px">
+      <input type="text" id="procSearch" placeholder="搜索进程..." style="flex:1;padding:6px 10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:6px;color:#fff;font-size:13px;outline:none" oninput="filterProcs(this.value)">
+      <button onclick="refreshProcs()" style="padding:6px 12px;background:rgba(105,240,174,.2);border:none;border-radius:6px;color:#69f0ae;cursor:pointer">刷新</button>
+    </div>
+    <div class="pr ph"><span class="pn">名称</span><span class="pc">CPU</span><span class="pm">内存</span><span style="width:50px;text-align:right">PID</span></div>
+    <div id="procList" style="max-height:350px;overflow-y:auto;-webkit-overflow-scrolling:touch;touch-action:pan-y"></div>
+    <div style="padding:8px 10px;font-size:12px;color:#888;border-top:1px solid rgba(255,255,255,.06)"><span id="procCount">加载中...</span></div>
+  </div>
+</div>
+<!-- Process Context Menu -->
+<div class="exp-context" id="procContext">
+  <div class="exp-context-item" onclick="procKill()">💀 结束进程</div>
+  <div class="exp-context-item" onclick="procForceKill()" style="color:#ff8a80">⚡ 强制结束</div>
 </div>
 
-<!-- Files -->
+<!-- Explorer -->
 <div class="tab-content" id="tab-files">
   <div class="card">
-    <div class="ct">FILE BROWSER</div>
-    <div id="fbPath" style="font-size:13px;color:#69f0ae;margin-bottom:10px;font-family:monospace">Loading...</div>
-    <div class="flist" id="fileList"></div>
+    <div class="ct">资源管理器</div>
+    <div class="exp-toolbar">
+      <button class="exp-btn" onclick="expBack()" id="expBackBtn" title="后退">◀</button>
+      <button class="exp-btn" onclick="expForward()" id="expFwdBtn" title="前进">▶</button>
+      <button class="exp-btn" onclick="expHome()" title="主页">🏠</button>
+      <button class="exp-btn" onclick="expUp()" title="上一级">⬆</button>
+      <div class="exp-addr">
+        <input type="text" id="expAddr" value="" placeholder="输入路径..." onkeydown="if(event.key==='Enter')expGo(this.value)">
+        <button onclick="expGo(document.getElementById('expAddr').value)">→</button>
+      </div>
+      <div class="exp-search">
+        <input type="text" id="expSearch" placeholder="搜索..." oninput="expFilter(this.value)">
+      </div>
+    </div>
+    <div class="exp-quick" id="expQuick"></div>
+    <div class="exp-header"><span class="exp-hname">名称</span><span class="exp-hsize">大小</span><span class="exp-htime">修改时间</span></div>
+    <div id="expList" style="max-height:350px;overflow-y:auto;-webkit-overflow-scrolling:touch;touch-action:pan-y"></div>
+    <div class="exp-status"><span id="expStatus">就绪</span><span id="expCount"></span></div>
   </div>
+</div>
+<!-- Context Menu -->
+<div class="exp-context" id="expContext">
+  <div class="exp-context-item" onclick="ctxOpen()">📂 打开</div>
+  <div class="exp-context-item" onclick="ctxDownload()">⬇️ 下载</div>
+  <div class="exp-context-divider"></div>
+  <div class="exp-context-item" onclick="ctxNewFolder()">📁 新建文件夹</div>
+  <div class="exp-context-item" onclick="ctxRename()">✏️ 重命名</div>
+  <div class="exp-context-item" onclick="ctxDelete()" style="color:#ff8a80">🗑️ 删除</div>
 </div>
 
 <!-- Tools -->
@@ -336,7 +456,7 @@ function switchTab(n){
   document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['status','files','tools'][i]===n));
   document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
   document.getElementById('tab-'+n).classList.add('active');
-  if(n==='files'&&!loaded)loadDrives();
+  if(n==='files')expLoad();
 }
 
 // AJAX refresh
@@ -411,6 +531,23 @@ async function loadDrives(){
   }catch(e){document.getElementById('fileList').innerHTML='<div style="color:#ff8a80">Error loading drives</div>'}
 }
 
+let longPressTimer=null,longPressTarget=null;
+function startLongPress(e,el){
+  e.preventDefault();
+  longPressTarget=el;
+  longPressTimer=setTimeout(()=>{
+    el.style.background='rgba(105,240,174,.15)';
+    if(confirm('下载文件 '+el.dataset.name+' ?')){
+      window.open('/api/download?p='+encodeURIComponent(el.dataset.path));
+    }
+    el.style.background='';
+    longPressTarget=null;
+  },500);
+}
+function cancelLongPress(){
+  if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}
+  if(longPressTarget){longPressTarget.style.background='';longPressTarget=null;}
+}
 async function openDir(path){
   try{
     const r=await fetch('/api/files?p='+encodeURIComponent(path));
@@ -420,18 +557,123 @@ async function openDir(path){
     const c=document.getElementById('fileList');
     let h='<div class="fitem" onclick="loadDrives()"><span class="ficon">&#128194;</span><span class="fname" style="color:#69f0ae">Back to Drives</span></div>';
     d.items.forEach(i=>{
+      const fp=d.path.replace(/\\$/,'')+'\\'+i.name;
       if(i.dir){
-        const fp=d.path.replace(/\\$/,'')+'\\'+i.name;
-        h+='<div class="fitem" data-path="'+fp+'" onclick="openDir(this.dataset.path)">';
+        h+='<div class="fitem" data-path="'+fp+'" data-name="'+i.name+'" onclick="openDir(this.dataset.path)">';
         h+='<span class="ficon">&#128193;</span><span class="fname">'+i.name+'</span><span class="fdate">'+i.time+'</span></div>';
       }else{
         const sz=i.size>1048576?(i.size/1048576).toFixed(1)+'MB':i.size>1024?(i.size/1024).toFixed(0)+'KB':i.size+'B';
-        h+='<div class="fitem"><span class="ficon">&#128196;</span><span class="fname">'+i.name+'</span><span class="fsize">'+sz+'</span><span class="fdate">'+i.time+'</span></div>';
+        h+='<div class="fitem" data-path="'+fp+'" data-name="'+i.name+'" ontouchstart="startLongPress(event,this)" ontouchend="cancelLongPress()" ontouchmove="cancelLongPress()" onmousedown="startLongPress(event,this)" onmouseup="cancelLongPress()" onmouseleave="cancelLongPress()">';
+        h+='<span class="ficon">&#128196;</span><span class="fname">'+i.name+'</span><span class="fsize">'+sz+'</span><span class="fdate">'+i.time+'</span>';
+        h+='<span style="font-size:11px;color:#69f0ae;margin-left:8px">长按下载</span></div>';
       }
     });
     c.innerHTML=h;
   }catch(e){alert('Network error')}
 }
+
+// Explorer
+let expHistory=[],expIdx=-1,expCurPath='',expAllItems=[],expLoaded=false;
+const fileIcons={'.txt':'📄','.pdf':'📕','.doc':'📘','.docx':'📘','.xls':'📗','.xlsx':'📗','.ppt':'📙','.pptx':'📙','.jpg':'🖼️','.jpeg':'🖼️','.png':'🖼️','.gif':'🖼️','.mp3':'🎵','.mp4':'🎬','.zip':'📦','.rar':'📦','.exe':'⚙️','.py':'🐍','.js':'📜','.html':'🌐','.css':'🎨','.json':'📋'};
+function getIcon(n,isDir){if(isDir)return '📁';const e='.'+n.split('.').pop().toLowerCase();return fileIcons[e]||'📄';}
+function fmtSize(b){if(b>1073741824)return (b/1073741824).toFixed(1)+' GB';if(b>1048576)return (b/1048576).toFixed(1)+' MB';if(b>1024)return (b/1024).toFixed(0)+' KB';return b+' B';}
+async function expLoad(){
+  if(expLoaded)return;expLoaded=true;
+  try{
+    const qa=await(await fetch('/api/drives')).json();
+    let qh='';
+    qa.drives.forEach(d=>{qh+='<div class="exp-quick-item" onclick="expGo(\''+d.letter+':\\\')">💾 '+d.letter+':\ ('+d.free+' GB free)</div>';});
+    document.getElementById('expQuick').innerHTML=qh;
+    expGo('C:\\');
+  }catch(e){document.getElementById('expList').innerHTML='<div style="color:#ff8a80;padding:20px">加载失败</div>'}
+}
+async function expGo(path){
+  if(!path)return;path=path.replace(/\//g,'\\');
+  if(path.length===2&&path[1]===':')path+='\\';
+  document.getElementById('expStatus').textContent='加载中...';
+  try{
+    const r=await fetch('/api/files?p='+encodeURIComponent(path));
+    const d=await r.json();
+    if(d.error){alert(d.error);document.getElementById('expStatus').textContent='错误';return}
+    expCurPath=d.path;expAllItems=d.items;
+    document.getElementById('expAddr').value=d.path;
+    document.getElementById('expSearch').value='';
+    if(expIdx<0||expHistory[expIdx]!==d.path){expHistory=expHistory.slice(0,expIdx+1);expHistory.push(d.path);expIdx=expHistory.length-1;}
+    expRender(d.items);document.getElementById('expStatus').textContent='就绪';
+  }catch(e){document.getElementById('expStatus').textContent='网络错误'}
+}
+function expRender(items){
+  const c=document.getElementById('expList');let h='',dirs=0,files=0;
+  items.forEach(i=>{
+    h+='<div class="exp-item" data-name="'+i.name+'" data-dir="'+i.dir+'" data-path="'+expCurPath.replace(/\\$/,'')+'\\'+i.name+'" ondblclick="expDblClick(this)" oncontextmenu="expCtx(event,this)" ontouchstart="expLongPress(event,this)" ontouchend="expCancelPress()" ontouchmove="expCancelPress()" onmousedown="expLongPress(event,this)" onmouseup="expCancelPress()" onmouseleave="expCancelPress()">';
+    h+='<span class="exp-icon">'+getIcon(i.name,i.dir)+'</span>';
+    h+='<span class="exp-name">'+i.name+'</span>';
+    h+='<span class="exp-size">'+(i.dir?'':fmtSize(i.size))+'</span>';
+    h+='<span class="exp-time">'+i.time+'</span></div>';
+    if(i.dir)dirs++;else files++;
+  });
+  if(!items.length)h='<div style="padding:20px;text-align:center;color:#888">空文件夹</div>';
+  c.innerHTML=h;document.getElementById('expCount').textContent=dirs+' 个文件夹, '+files+' 个文件';
+}
+function expDblClick(el){if(el.dataset.dir==='true')expGo(expCurPath.replace(/\\$/,'')+'\\'+el.dataset.name);}
+function expBack(){if(expIdx>0){expIdx--;expGo(expHistory[expIdx])}}
+function expForward(){if(expIdx<expHistory.length-1){expIdx++;expGo(expHistory[expIdx])}}
+function expHome(){expGo('C:\\')}
+function expUp(){const p=expCurPath.replace(/\\$/,'').split('\\');if(p.length>1){p.pop();expGo(p.join('\\')||p[0]+'\\');}}
+function expFilter(q){q=q.toLowerCase();expRender(q?expAllItems.filter(i=>i.name.toLowerCase().includes(q)):expAllItems);}
+let ctxItem=null,expPressTimer=null,expPressTarget=null;
+function expLongPress(e,el){e.preventDefault();expPressTarget=el;expPressTimer=setTimeout(()=>{el.style.background='rgba(105,240,174,.15)';if(el.dataset.dir!=='true'&&confirm('下载 '+el.dataset.name+' ?')){window.open('/api/download?p='+encodeURIComponent(el.dataset.path));}el.style.background='';expPressTarget=null;},500);}
+function expCancelPress(){if(expPressTimer){clearTimeout(expPressTimer);expPressTimer=null;}if(expPressTarget){expPressTarget.style.background='';expPressTarget=null;}}
+function expCtx(e,el){e.preventDefault();ctxItem=el;el.classList.add('selected');const m=document.getElementById('expContext');m.style.display='block';m.style.left=Math.min(e.clientX,window.innerWidth-180)+'px';m.style.top=Math.min(e.clientY,window.innerHeight-200)+'px';}
+document.addEventListener('click',()=>{document.getElementById('expContext').style.display='none';document.querySelectorAll('.exp-item.selected').forEach(e=>e.classList.remove('selected'))});
+function ctxOpen(){if(ctxItem)expDblClick(ctxItem)}
+function ctxDownload(){if(!ctxItem||ctxItem.dataset.dir==='true')return;window.open('/api/download?p='+encodeURIComponent(ctxItem.dataset.path));}
+function ctxNewFolder(){const n=prompt('新建文件夹名称:');if(!n)return;fetch('/api/mkdir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:expCurPath.replace(/\\$/,'')+'\\'+n})}).then(r=>r.json()).then(d=>{if(d.ok)expGo(expCurPath);else alert(d.error)});}
+function ctxRename(){if(!ctxItem)return;const o=ctxItem.dataset.name;const n=prompt('重命名:',o);if(!n||n===o)return;fetch('/api/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({old:ctxItem.dataset.path,new:expCurPath.replace(/\\$/,'')+'\\'+n})}).then(r=>r.json()).then(d=>{if(d.ok)expGo(expCurPath);else alert(d.error)});}
+function ctxDelete(){if(!ctxItem)return;if(!confirm('确定删除 '+ctxItem.dataset.name+' ?'))return;fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:ctxItem.dataset.path})}).then(r=>r.json()).then(d=>{if(d.ok)expGo(expCurPath);else alert(d.error)});}
+
+// Process Manager
+let allProcs=[],procCtxItem=null,procPressTimer=null,procPressTarget=null;
+async function refreshProcs(){
+  try{
+    const ctrl=new AbortController();
+    const tid=setTimeout(()=>ctrl.abort(),8000);
+    const resp=await fetch('/api/processes',{signal:ctrl.signal});
+    clearTimeout(tid);
+    const data=await resp.json();
+    if(data.procs){allProcs=data.procs;renderProcs(allProcs);}
+  }catch(e){document.getElementById('procCount').textContent='加载超时，点击刷新';}
+}
+function renderProcs(procs){
+  const c=document.getElementById('procList');let h='';
+  procs.forEach(p=>{
+    h+='<div class="pr" data-pid="'+p.pid+'" data-name="'+p.name+'" oncontextmenu="procCtx(event,this)" ontouchstart="procLongPress(event,this)" ontouchend="procCancelPress()" ontouchmove="procCancelPress()" style="cursor:pointer">';
+    h+='<span class="pn">'+p.name+'</span>';
+    h+='<span class="pc">'+(p.cpu?p.cpu.toFixed(1)+'s':'-')+'</span>';
+    h+='<span class="pm">'+p.mem+' MB</span>';
+    h+='<span style="width:50px;text-align:right;color:#888">'+p.pid+'</span></div>';
+  });
+  c.innerHTML=h;document.getElementById('procCount').textContent='共 '+procs.length+' 个进程';
+}
+function filterProcs(q){q=q.toLowerCase();renderProcs(q?allProcs.filter(p=>p.name.toLowerCase().includes(q)):allProcs);}
+function procLongPress(e,el){e.preventDefault();procPressTarget=el;procPressTimer=setTimeout(()=>{el.style.background='rgba(105,240,174,.15)';procCtxItem=el;showProcMenu(e.touches?e.touches[0].clientX:0,e.touches?e.touches[0].clientY:0);},500);}
+function procCancelPress(){if(procPressTimer){clearTimeout(procPressTimer);procPressTimer=null;}if(procPressTarget){procPressTarget.style.background='';procPressTarget=null;}}
+function procCtx(e,el){e.preventDefault();procCtxItem=el;el.style.background='rgba(105,240,174,.15)';showProcMenu(e.clientX,e.clientY);}
+function showProcMenu(x,y){const m=document.getElementById('procContext');m.style.display='block';m.style.left=Math.min(x,window.innerWidth-180)+'px';m.style.top=Math.min(y,window.innerHeight-100)+'px';}
+document.addEventListener('click',()=>{document.getElementById('procContext').style.display='none';document.querySelectorAll('.pr[style*="background"]').forEach(e=>e.style.background='');});
+async function procKill(){
+  if(!procCtxItem)return;const pid=procCtxItem.dataset.pid,name=procCtxItem.dataset.name;
+  if(!confirm('确定结束 '+name+' (PID:'+pid+')?'))return;
+  const r=await fetch('/api/kill',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pid:parseInt(pid)})});
+  const d=await r.json();if(d.ok)refreshProcs();else alert(d.error);
+}
+async function procForceKill(){
+  if(!procCtxItem)return;const pid=procCtxItem.dataset.pid,name=procCtxItem.dataset.name;
+  if(!confirm('强制结束 '+name+'?'))return;
+  fetch('/api/terminal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:'Stop-Process -Id '+pid+' -Force'})}).then(()=>refreshProcs());
+}
+setInterval(()=>{if(!document.hidden)refreshProcs();},10000);
+setTimeout(refreshProcs,2000);
 </script>
 </body>
 </html>"""
@@ -592,6 +834,47 @@ function login(){
                 self.wfile.write(data)
             except:
                 self.send_error(404)
+        elif path == "/api/download":
+            raw = qs.get("p", [""])[0]
+            pth = unquote(raw).replace("/", "\\")
+            if os.path.isfile(pth):
+                try:
+                    with open(pth, "rb") as f:
+                        data = f.read()
+                    import mimetypes
+                    mime = mimetypes.guess_type(pth)[0] or "application/octet-stream"
+                    filename = os.path.basename(pth)
+                    self.send_response(200)
+                    self.send_header("Content-Type", mime)
+                    self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                    self.send_header("Content-Length", len(data))
+                    self.end_headers()
+                    self.wfile.write(data)
+                except Exception as e:
+                    self.send_error(500, str(e))
+            else:
+                self.send_error(404)
+            return
+        elif path == "/api/processes":
+            # 使用 psutil 快速获取进程列表
+            if HAS_PSUTIL:
+                try:
+                    procs = []
+                    for p in psutil.process_iter(['pid', 'name', 'cpu_times', 'memory_info']):
+                        try:
+                            info = p.info
+                            cpu = sum(info['cpu_times'][:2]) if info['cpu_times'] else 0
+                            mem = round(info['memory_info'].rss / 1048576) if info['memory_info'] else 0
+                            procs.append({'pid': info['pid'], 'name': info['name'] or 'N/A', 'cpu': round(cpu, 1), 'mem': mem})
+                        except:
+                            continue
+                    procs.sort(key=lambda x: x['cpu'], reverse=True)
+                    self.json_resp({'procs': procs})
+                except Exception as e:
+                    self.json_resp({'error': str(e)})
+            else:
+                self.json_resp({'error': 'psutil not available'})
+            return
         elif path == "/api/keepalive":
             s = qs.get("set", [None])[0]
             if s == "on": set_keep_screen_alive(True)
@@ -624,7 +907,73 @@ function login(){
             self.json_resp({"error": "Unauthorized"}, 401)
             return
 
-        if path == "/api/terminal":
+        if path == "/api/mkdir":
+            cl = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(cl)
+            try:
+                d = json.loads(body)
+                pth = d.get("path", "")
+                if not pth:
+                    self.json_resp({"ok": False, "error": "路径不能为空"})
+                    return
+                os.makedirs(pth, exist_ok=True)
+                self.json_resp({"ok": True})
+            except Exception as e:
+                self.json_resp({"ok": False, "error": str(e)})
+            return
+        elif path == "/api/rename":
+            cl = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(cl)
+            try:
+                d = json.loads(body)
+                old_path = d.get("old", "")
+                new_path = d.get("new", "")
+                if not old_path or not new_path:
+                    self.json_resp({"ok": False, "error": "路径不能为空"})
+                    return
+                os.rename(old_path, new_path)
+                self.json_resp({"ok": True})
+            except Exception as e:
+                self.json_resp({"ok": False, "error": str(e)})
+            return
+        elif path == "/api/delete":
+            cl = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(cl)
+            try:
+                d = json.loads(body)
+                pth = d.get("path", "")
+                if not pth:
+                    self.json_resp({"ok": False, "error": "路径不能为空"})
+                    return
+                import shutil
+                if os.path.isdir(pth):
+                    shutil.rmtree(pth)
+                else:
+                    os.remove(pth)
+                self.json_resp({"ok": True})
+            except Exception as e:
+                self.json_resp({"ok": False, "error": str(e)})
+            return
+        elif path == "/api/kill":
+            cl = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(cl)
+            try:
+                d = json.loads(body)
+                pid = d.get("pid", 0)
+                if not pid:
+                    self.json_resp({"ok": False, "error": "PID不能为空"})
+                    return
+                import signal
+                os.kill(pid, signal.SIGTERM)
+                self.json_resp({"ok": True})
+            except ProcessLookupError:
+                self.json_resp({"ok": False, "error": "进程不存在"})
+            except PermissionError:
+                self.json_resp({"ok": False, "error": "权限不足"})
+            except Exception as e:
+                self.json_resp({"ok": False, "error": str(e)})
+            return
+        elif path == "/api/terminal":
             cl = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(cl)
             try:
