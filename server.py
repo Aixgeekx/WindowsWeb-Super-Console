@@ -27,50 +27,69 @@ def run_ps(cmd):
     try:
         r = subprocess.run(
             ["powershell", "-NoProfile", "-Command", cmd],
-            capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace"
+            capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace"
         )
         return r.stdout.strip()
     except Exception as e:
         return f"Error: {e}"
 
-def get_cpu_usage():
-    out = run_ps("(Get-Counter '\\Processor(_Total)\\% Processor Time').CounterSamples.CookedValue")
-    try: return round(float(out), 1)
-    except: return 0
-
-def get_memory_info():
-    out = run_ps("""
+def get_all_system_info():
+    """一次 PowerShell 获取全部系统信息，避免多次启动进程"""
+    out = run_ps('''
+        $cpu = [math]::Round((Get-Counter "\\Processor(_Total)\\% Processor Time").CounterSamples.CookedValue, 1)
         $os = Get-CimInstance Win32_OperatingSystem
-        $total = [math]::Round($os.TotalVisibleMemorySize/1MB, 2)
-        $free = [math]::Round($os.FreePhysicalMemory/1MB, 2)
-        $used = [math]::Round($total - $free, 2)
-        $pct = [math]::Round($used / $total * 100, 1)
-        "$used|$total|$free|$pct"
-    """)
-    try:
-        parts = out.split("|")
-        return {"used": float(parts[0]), "total": float(parts[1]), "free": float(parts[2]), "percent": float(parts[3])}
-    except:
-        return {"used": 0, "total": 0, "free": 0, "percent": 0}
-
-def get_disk_info():
-    out = run_ps("""
-        Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | ForEach-Object {
-            $total = [math]::Round($_.Size/1GB, 1)
-            $free = [math]::Round($_.FreeSpace/1GB, 1)
-            $used = [math]::Round($total - $free, 1)
-            $pct = if($total -gt 0){[math]::Round($used/$total*100,1)}else{0}
-            "$($_.DeviceID)|$used|$total|$free|$pct"
+        $memTotal = [math]::Round($os.TotalVisibleMemorySize/1MB, 2)
+        $memFree = [math]::Round($os.FreePhysicalMemory/1MB, 2)
+        $memUsed = [math]::Round($memTotal - $memFree, 2)
+        $memPct = [math]::Round($memUsed / $memTotal * 100, 1)
+        $uptime = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+        $uptimeStr = [math]::Round(((Get-Date) - $uptime).TotalHours, 0)
+        $disks = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | ForEach-Object {
+            $t = [math]::Round($_.Size/1GB, 1)
+            $f = [math]::Round($_.FreeSpace/1GB, 1)
+            $u = [math]::Round($t - $f, 1)
+            $p = if($t -gt 0){[math]::Round($u/$t*100,1)}else{0}
+            "$($_.DeviceID)|$u|$t|$f|$p"
         }
-    """)
-    disks = []
+        $procCount = (Get-Process).Count
+        $topProcs = Get-Process | Sort-Object CPU -Descending | Select-Object -First 8 Name,CPU,WorkingSet64 | ForEach-Object {
+            "$($_.Name)|$([math]::Round($_.CPU,1))|$([math]::Round($_.WorkingSet64/1MB,1))"
+        }
+        Write-Output "CPU:$cpu"
+        Write-Output "MEM:$memUsed|$memTotal|$memFree|$memPct"
+        Write-Output "UPTIME:$uptimeStr"
+        Write-Output "PROCS:$procCount"
+        foreach($d in $disks){Write-Output "DISK:$d"}
+        foreach($p in $topProcs){Write-Output "TOP:$p"}
+    ''')
+    info = {"cpu":0,"mem":{"used":0,"total":0,"free":0,"percent":0},"disks":[],"uptime":"N/A","procs":0,"top":[]}
     for line in out.split("\n"):
         line = line.strip()
-        if "|" in line:
-            parts = line.split("|")
-            if len(parts) == 5:
-                disks.append({"drive": parts[0], "used": float(parts[1]), "total": float(parts[2]), "free": float(parts[3]), "percent": float(parts[4])})
-    return disks
+        if line.startswith("CPU:"):
+            try: info["cpu"] = float(line[4:])
+            except: pass
+        elif line.startswith("MEM:"):
+            try:
+                p = line[4:].split("|")
+                info["mem"] = {"used":float(p[0]),"total":float(p[1]),"free":float(p[2]),"percent":float(p[3])}
+            except: pass
+        elif line.startswith("UPTIME:"):
+            try: info["uptime"] = f"0d {int(float(line[7:]))}h"
+            except: info["uptime"] = line[7:]
+        elif line.startswith("PROCS:"):
+            try: info["procs"] = int(line[6:])
+            except: pass
+        elif line.startswith("DISK:"):
+            try:
+                p = line[5:].split("|")
+                if len(p)==5: info["disks"].append({"drive":p[0],"used":float(p[1]),"total":float(p[2]),"free":float(p[3]),"percent":float(p[4])})
+            except: pass
+        elif line.startswith("TOP:"):
+            try:
+                p = line[4:].split("|")
+                if len(p)==3: info["top"].append({"name":p[0],"cpu":float(p[1]),"mem_mb":float(p[2])})
+            except: pass
+    return info
 
 def get_uptime():
     out = run_ps("""
@@ -117,13 +136,7 @@ def get_top_processes(n=8):
     return procs
 
 def get_gpu_info():
-    out = run_ps('''
-        try {
-            $gpus = Get-CimInstance Win32_VideoController | Where-Object { $_.Name -notmatch 'Oray|Remote|Virtual|Display|Basic' }
-            if ($gpus) { $gpus[0].Name } else { (Get-CimInstance Win32_VideoController | Select-Object -First 1).Name }
-        } catch { "N/A" }
-    ''')
-    return out if out else "N/A"
+    return run_ps("(Get-CimInstance Win32_VideoController | Where-Object Name -notmatch 'Oray|Remote|Virtual|Display|Basic' | Select-Object -First 1).Name") or "N/A"
 
 # ─── 保持屏幕唤醒 ───
 
@@ -245,11 +258,11 @@ def get_all_status():
     if now - cache_time < 3 and cache:
         return cache
     net = get_network_info()
-    mem = get_memory_info()
+    sysinfo = get_all_system_info()
     cache = {
-        "cpu": get_cpu_usage(), "mem": mem, "disks": get_disk_info(),
-        "uptime": get_uptime(), "procs": get_process_count(),
-        "net": net, "gpu": get_gpu_info(), "top": get_top_processes(8),
+        "cpu": sysinfo["cpu"], "mem": sysinfo["mem"], "disks": sysinfo["disks"],
+        "uptime": sysinfo["uptime"], "procs": sysinfo["procs"],
+        "net": net, "gpu": get_gpu_info(), "top": sysinfo["top"],
         "ts": time.strftime("%Y-%m-%d %H:%M:%S")
     }
     cache_time = now
