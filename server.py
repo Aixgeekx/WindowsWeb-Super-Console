@@ -277,9 +277,9 @@ HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>PC Monitor</title>
 <style>
-@font-face{font-family:'Maple';src:url('/font.ttf') format('truetype');font-weight:normal;font-style:normal}
+
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Maple',-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;padding:16px;padding-bottom:80px}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif,-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;padding:16px;padding-bottom:80px}
 .hdr{text-align:center;padding:20px 0 16px;border-bottom:1px solid rgba(255,255,255,.08);margin-bottom:16px}
 .hdr h1{font-size:20px;font-weight:600}
 .hdr .sub{font-size:13px;color:#888;margin-top:4px}
@@ -742,16 +742,6 @@ async function procForceKill(){
 setInterval(()=>{if(!document.hidden)refreshProcs();},10000);
 setTimeout(refreshProcs,2000);
 
-let procSortKey='cpu',procSortDir=-1;
-function sortProcs(key){
-  if(procSortKey===key)procSortDir*=-1;
-  else{procSortKey=key;procSortDir=-1;}
-  const sorted=[...allProcs].sort((a,b)=>{
-    if(key==='name')return procSortDir*a.name.localeCompare(b.name);
-    return procSortDir*((a[key]||0)-(b[key]||0));
-  });
-  renderProcs(sorted);
-}
 </script>
 </body>
 </html>"""
@@ -866,16 +856,6 @@ function login(){
   }).catch(()=>{document.getElementById("err").textContent="网络错误";document.getElementById("err").style.display="block"})
 }
 
-let procSortKey='cpu',procSortDir=-1;
-function sortProcs(key){
-  if(procSortKey===key)procSortDir*=-1;
-  else{procSortKey=key;procSortDir=-1;}
-  const sorted=[...allProcs].sort((a,b)=>{
-    if(key==='name')return procSortDir*a.name.localeCompare(b.name);
-    return procSortDir*((a[key]||0)-(b[key]||0));
-  });
-  renderProcs(sorted);
-}
 </script>
 </body>
 </html>'''
@@ -919,17 +899,6 @@ function sortProcs(key){
                 self.json_resp({"error": err, "path": pth, "items": []})
             else:
                 self.json_resp({"path": pth, "items": items})
-        elif path == "/font.ttf":
-            try:
-                with open(os.path.join(os.path.dirname(__file__), "font.ttf"), "rb") as f:
-                    data = f.read()
-                self.send_response(200)
-                self.send_header("Content-Type", "font/ttf")
-                self.send_header("Cache-Control", "public, max-age=86400")
-                self.end_headers()
-                self.wfile.write(data)
-            except:
-                self.send_error(404)
         elif path == "/api/download":
             raw = qs.get("p", [""])[0]
             pth = unquote(raw).replace("/", "\\")
