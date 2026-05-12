@@ -505,7 +505,7 @@ function switchTab(n){
 
 // AJAX refresh
 let rt=null;
-function sched(){
+async function sched(){
   clearTimeout(rt);
   if(!document.hidden)rt=setTimeout(async()=>{
     if(document.hidden)return;
