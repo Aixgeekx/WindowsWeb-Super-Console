@@ -353,15 +353,36 @@ body{font-family:'Maple',-apple-system,sans-serif;background:#0a0a1a;color:#e0e0
 .exp-context-divider{height:1px;background:rgba(255,255,255,.1);margin:4px 0}
 .exp-status{display:flex;justify-content:space-between;padding:8px 10px;font-size:12px;color:#888;border-top:1px solid rgba(255,255,255,.06);margin-top:8px}
 
-.drive-card{background:linear-gradient(135deg,rgba(255,255,255,.06),rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:16px;margin-bottom:12px;cursor:pointer;transition:all .2s}
-.drive-card:hover{border-color:rgba(105,240,174,.3);transform:translateY(-1px)}
-.drive-card:active{transform:scale(.98)}
-.drive-card-header{display:flex;align-items:center;gap:10px;margin-bottom:10px}
-.drive-card-icon{font-size:28px}
-.drive-card-letter{font-size:22px;font-weight:700;color:#69f0ae}
-.drive-card-pct{margin-left:auto;font-size:20px;font-weight:600;color:#ccc}
-.drive-card-bar{background:rgba(255,255,255,.08);border-radius:8px;height:10px;overflow:hidden;margin-bottom:8px}
-.drive-card-info{font-size:12px;color:#888}
+/* 磁盘大卡片 - 醒目可视化 */
+.drive-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin-bottom:16px}
+.drive-card{position:relative;overflow:hidden;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:0;cursor:pointer;transition:all .25s}
+.drive-card:hover{border-color:rgba(105,240,174,.4);transform:translateY(-2px);box-shadow:0 8px 32px rgba(105,240,174,.1)}
+.drive-card:active{transform:scale(.97)}
+.drive-card-bg{position:absolute;bottom:0;left:0;right:0;border-radius:0 0 16px 16px;transition:height .8s ease;opacity:.15}
+.drive-card-body{position:relative;padding:20px;display:flex;align-items:center;gap:16px}
+.drive-ring{position:relative;width:80px;height:80px;flex-shrink:0}
+.drive-ring svg{transform:rotate(-90deg)}
+.drive-ring circle{fill:none;stroke-width:6;stroke-linecap:round}
+.drive-ring .ring-bg{stroke:rgba(255,255,255,.08)}
+.drive-ring .ring-fg{transition:stroke-dashoffset .8s ease}
+.drive-ring-pct{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:#fff}
+.drive-info{flex:1;min-width:0}
+.drive-letter{font-size:24px;font-weight:800;margin-bottom:2px}
+.drive-label{font-size:12px;color:#888;margin-bottom:8px}
+.drive-bar{background:rgba(255,255,255,.08);border-radius:6px;height:8px;overflow:hidden;margin-bottom:6px}
+.drive-bar-fill{height:100%;border-radius:6px;transition:width .8s ease}
+.drive-detail{display:flex;justify-content:space-between;font-size:11px;color:#888}
+.drive-detail b{color:#ccc;font-weight:500}
+/* 颜色主题 */
+.drive-g .drive-letter{color:#69f0ae}
+.drive-g .ring-fg,.drive-g .drive-bar-fill{stroke:#69f0ae;background:#69f0ae}
+.drive-g .drive-card-bg{background:linear-gradient(to top,#69f0ae,#00c853)}
+.drive-y .drive-letter{color:#ffeb3b}
+.drive-y .ring-fg,.drive-y .drive-bar-fill{stroke:#ffeb3b;background:#ffeb3b}
+.drive-y .drive-card-bg{background:linear-gradient(to top,#ffeb3b,#ffc107)}
+.drive-r .drive-letter{color:#ff8a80}
+.drive-r .ring-fg,.drive-r .drive-bar-fill{stroke:#ff8a80;background:#ff8a80}
+.drive-r .drive-card-bg{background:linear-gradient(to top,#ff8a80,#ff5252)}
 </style>
 </head>
 <body>
@@ -782,15 +803,36 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;displ
 .login-box button:active{transform:scale(.98)}
 .error{color:#ff8a80;font-size:13px;margin-bottom:12px;display:none}
 
-.drive-card{background:linear-gradient(135deg,rgba(255,255,255,.06),rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:16px;margin-bottom:12px;cursor:pointer;transition:all .2s}
-.drive-card:hover{border-color:rgba(105,240,174,.3);transform:translateY(-1px)}
-.drive-card:active{transform:scale(.98)}
-.drive-card-header{display:flex;align-items:center;gap:10px;margin-bottom:10px}
-.drive-card-icon{font-size:28px}
-.drive-card-letter{font-size:22px;font-weight:700;color:#69f0ae}
-.drive-card-pct{margin-left:auto;font-size:20px;font-weight:600;color:#ccc}
-.drive-card-bar{background:rgba(255,255,255,.08);border-radius:8px;height:10px;overflow:hidden;margin-bottom:8px}
-.drive-card-info{font-size:12px;color:#888}
+/* 磁盘大卡片 - 醒目可视化 */
+.drive-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin-bottom:16px}
+.drive-card{position:relative;overflow:hidden;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:0;cursor:pointer;transition:all .25s}
+.drive-card:hover{border-color:rgba(105,240,174,.4);transform:translateY(-2px);box-shadow:0 8px 32px rgba(105,240,174,.1)}
+.drive-card:active{transform:scale(.97)}
+.drive-card-bg{position:absolute;bottom:0;left:0;right:0;border-radius:0 0 16px 16px;transition:height .8s ease;opacity:.15}
+.drive-card-body{position:relative;padding:20px;display:flex;align-items:center;gap:16px}
+.drive-ring{position:relative;width:80px;height:80px;flex-shrink:0}
+.drive-ring svg{transform:rotate(-90deg)}
+.drive-ring circle{fill:none;stroke-width:6;stroke-linecap:round}
+.drive-ring .ring-bg{stroke:rgba(255,255,255,.08)}
+.drive-ring .ring-fg{transition:stroke-dashoffset .8s ease}
+.drive-ring-pct{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:#fff}
+.drive-info{flex:1;min-width:0}
+.drive-letter{font-size:24px;font-weight:800;margin-bottom:2px}
+.drive-label{font-size:12px;color:#888;margin-bottom:8px}
+.drive-bar{background:rgba(255,255,255,.08);border-radius:6px;height:8px;overflow:hidden;margin-bottom:6px}
+.drive-bar-fill{height:100%;border-radius:6px;transition:width .8s ease}
+.drive-detail{display:flex;justify-content:space-between;font-size:11px;color:#888}
+.drive-detail b{color:#ccc;font-weight:500}
+/* 颜色主题 */
+.drive-g .drive-letter{color:#69f0ae}
+.drive-g .ring-fg,.drive-g .drive-bar-fill{stroke:#69f0ae;background:#69f0ae}
+.drive-g .drive-card-bg{background:linear-gradient(to top,#69f0ae,#00c853)}
+.drive-y .drive-letter{color:#ffeb3b}
+.drive-y .ring-fg,.drive-y .drive-bar-fill{stroke:#ffeb3b;background:#ffeb3b}
+.drive-y .drive-card-bg{background:linear-gradient(to top,#ffeb3b,#ffc107)}
+.drive-r .drive-letter{color:#ff8a80}
+.drive-r .ring-fg,.drive-r .drive-bar-fill{stroke:#ff8a80;background:#ff8a80}
+.drive-r .drive-card-bg{background:linear-gradient(to top,#ff8a80,#ff5252)}
 </style>
 </head>
 <body>
