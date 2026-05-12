@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 内网电脑状态监控
 用法: python server.py [端口号，默认9999]
@@ -610,11 +610,34 @@ function getIcon(n,isDir){if(isDir)return '📁';const e='.'+n.split('.').pop().
 function fmtSize(b){if(b>1073741824)return (b/1073741824).toFixed(1)+' GB';if(b>1048576)return (b/1048576).toFixed(1)+' MB';if(b>1024)return (b/1024).toFixed(0)+' KB';return b+' B';}
 async function expLoad(){
   if(expLoaded)return;expLoaded=true;
+  document.getElementById('expList').innerHTML='<div style="padding:40px;text-align:center;color:#888"><span class="loading">&#8635;</span> 加载磁盘...</div>';
   try{
     const qa=await(await fetch('/api/drives')).json();
-    let qh='';
-    qa.drives.forEach(d=>{qh+='<div class="exp-quick-item" onclick="expGo(\''+d.letter+':\\\')">💾 '+d.letter+':\ ('+d.free+' GB free)</div>';});
-    document.getElementById('expQuick').innerHTML=qh;
+    let dh='<div class="drive-grid">';
+    qa.drives.forEach(d=>{
+      const total=parseFloat(d.used)+parseFloat(d.free);
+      const pct=total>0?Math.round(parseFloat(d.used)/total*100):0;
+      const bc=pct<60?'g':pct<85?'y':'r';
+      const r=36,circ=2*Math.PI*r,offset=circ-(pct/100)*circ;
+      dh+='<div class="drive-card drive-'+bc+'" onclick="expGo(\''+d.letter+':\\')">';
+      dh+='<div class="drive-card-bg" style="height:'+pct+'%"></div>';
+      dh+='<div class="drive-card-body">';
+      dh+='<div class="drive-ring"><svg width="80" height="80" viewBox="0 0 80 80">';
+      dh+='<circle class="ring-bg" cx="40" cy="40" r="'+r+'"/>';
+      dh+='<circle class="ring-fg" cx="40" cy="40" r="'+r+'" stroke-dasharray="'+circ+'" stroke-dashoffset="'+offset+'"/>';
+      dh+='</svg><div class="drive-ring-pct">'+pct+'%</div></div>';
+      dh+='<div class="drive-info">';
+      dh+='<div class="drive-letter">'+d.letter+':</div>';
+      dh+='<div class="drive-label">'+(d.letter==='C'?'系统盘':'数据盘')+'</div>';
+      dh+='<div class="drive-bar"><div class="drive-bar-fill" style="width:'+pct+'%"></div></div>';
+      dh+='<div class="drive-detail"><span>已用 <b>'+d.used+' GB</b></span><span>剩余 <b>'+d.free+' GB</b></span></div>';
+      dh+='</div></div></div>';
+    });
+    dh+='</div>';
+    let qh='<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">';
+    qa.drives.forEach(d=>{qh+='<div class="exp-quick-item" onclick="expGo(\''+d.letter+':\\')">&#128190; '+d.letter+':盘</div>';});
+    qh+='</div>';
+    document.getElementById('expQuick').innerHTML=dh+qh;
     expGo('C:\\');
   }catch(e){document.getElementById('expList').innerHTML='<div style="color:#ff8a80;padding:20px">加载失败</div>'}
 }
@@ -804,35 +827,11 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;displ
 .error{color:#ff8a80;font-size:13px;margin-bottom:12px;display:none}
 
 /* 磁盘大卡片 - 醒目可视化 */
-.drive-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin-bottom:16px}
-.drive-card{position:relative;overflow:hidden;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:0;cursor:pointer;transition:all .25s}
-.drive-card:hover{border-color:rgba(105,240,174,.4);transform:translateY(-2px);box-shadow:0 8px 32px rgba(105,240,174,.1)}
-.drive-card:active{transform:scale(.97)}
-.drive-card-bg{position:absolute;bottom:0;left:0;right:0;border-radius:0 0 16px 16px;transition:height .8s ease;opacity:.15}
-.drive-card-body{position:relative;padding:20px;display:flex;align-items:center;gap:16px}
-.drive-ring{position:relative;width:80px;height:80px;flex-shrink:0}
-.drive-ring svg{transform:rotate(-90deg)}
-.drive-ring circle{fill:none;stroke-width:6;stroke-linecap:round}
-.drive-ring .ring-bg{stroke:rgba(255,255,255,.08)}
-.drive-ring .ring-fg{transition:stroke-dashoffset .8s ease}
-.drive-ring-pct{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:#fff}
-.drive-info{flex:1;min-width:0}
-.drive-letter{font-size:24px;font-weight:800;margin-bottom:2px}
-.drive-label{font-size:12px;color:#888;margin-bottom:8px}
-.drive-bar{background:rgba(255,255,255,.08);border-radius:6px;height:8px;overflow:hidden;margin-bottom:6px}
-.drive-bar-fill{height:100%;border-radius:6px;transition:width .8s ease}
-.drive-detail{display:flex;justify-content:space-between;font-size:11px;color:#888}
-.drive-detail b{color:#ccc;font-weight:500}
+
 /* 颜色主题 */
-.drive-g .drive-letter{color:#69f0ae}
-.drive-g .ring-fg,.drive-g .drive-bar-fill{stroke:#69f0ae;background:#69f0ae}
-.drive-g .drive-card-bg{background:linear-gradient(to top,#69f0ae,#00c853)}
-.drive-y .drive-letter{color:#ffeb3b}
-.drive-y .ring-fg,.drive-y .drive-bar-fill{stroke:#ffeb3b;background:#ffeb3b}
-.drive-y .drive-card-bg{background:linear-gradient(to top,#ffeb3b,#ffc107)}
-.drive-r .drive-letter{color:#ff8a80}
-.drive-r .ring-fg,.drive-r .drive-bar-fill{stroke:#ff8a80;background:#ff8a80}
-.drive-r .drive-card-bg{background:linear-gradient(to top,#ff8a80,#ff5252)}
+
+
+
 </style>
 </head>
 <body>
