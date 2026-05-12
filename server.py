@@ -1095,6 +1095,7 @@ function sortProcs(key){
     def json_resp(self, d, code=200):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(json.dumps(d, ensure_ascii=False).encode("utf-8"))
 
