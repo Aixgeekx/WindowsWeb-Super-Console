@@ -632,7 +632,7 @@ async function expLoad(){
       const pct=total>0?Math.round(parseFloat(d.used)/total*100):0;
       const bc=pct<60?'g':pct<85?'y':'r';
       const r=36,circ=2*Math.PI*r,offset=circ-(pct/100)*circ;
-      dh+='<div class="drive-card drive-'+bc+'" onclick="expGo(\''+d.letter+':\\')">';
+      dh+=`<div class="drive-card drive-${bc}" onclick="expGo('${d.letter}:\\')">`;
       dh+='<div class="drive-card-bg" style="height:'+pct+'%"></div>';
       dh+='<div class="drive-card-body">';
       dh+='<div class="drive-ring"><svg width="80" height="80" viewBox="0 0 80 80">';
@@ -648,7 +648,7 @@ async function expLoad(){
     });
     dh+='</div>';
     let qh='<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">';
-    qa.drives.forEach(d=>{qh+='<div class="exp-quick-item" onclick="expGo(\''+d.letter+':\\')">&#128190; '+d.letter+':盘</div>';});
+    qa.drives.forEach(d=>{qh+=`<div class="exp-quick-item" onclick="expGo('${d.letter}:\\')">${d.letter}:盘</div>`;});
     qh+='</div>';
     document.getElementById('expQuick').innerHTML=dh+qh;
     expGo('C:\\');
