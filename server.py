@@ -1101,6 +1101,7 @@ function sortProcs(key){
     def respond(self, code, ct, body):
         self.send_response(code)
         self.send_header("Content-Type", ct)
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(body)
 
