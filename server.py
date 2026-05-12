@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 内网电脑状态监控
 用法: python server.py [端口号，默认9999]
