@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 内网电脑状态监控
 用法: python server.py [端口号，默认9999]
@@ -352,6 +352,16 @@ body{font-family:'Maple',-apple-system,sans-serif;background:#0a0a1a;color:#e0e0
 .exp-context-item:hover{background:rgba(105,240,174,.15)}
 .exp-context-divider{height:1px;background:rgba(255,255,255,.1);margin:4px 0}
 .exp-status{display:flex;justify-content:space-between;padding:8px 10px;font-size:12px;color:#888;border-top:1px solid rgba(255,255,255,.06);margin-top:8px}
+
+.drive-card{background:linear-gradient(135deg,rgba(255,255,255,.06),rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:16px;margin-bottom:12px;cursor:pointer;transition:all .2s}
+.drive-card:hover{border-color:rgba(105,240,174,.3);transform:translateY(-1px)}
+.drive-card:active{transform:scale(.98)}
+.drive-card-header{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.drive-card-icon{font-size:28px}
+.drive-card-letter{font-size:22px;font-weight:700;color:#69f0ae}
+.drive-card-pct{margin-left:auto;font-size:20px;font-weight:600;color:#ccc}
+.drive-card-bar{background:rgba(255,255,255,.08);border-radius:8px;height:10px;overflow:hidden;margin-bottom:8px}
+.drive-card-info{font-size:12px;color:#888}
 </style>
 </head>
 <body>
@@ -386,8 +396,8 @@ body{font-family:'Maple',-apple-system,sans-serif;background:#0a0a1a;color:#e0e0
       <input type="text" id="procSearch" placeholder="搜索进程..." style="flex:1;padding:6px 10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:6px;color:#fff;font-size:13px;outline:none" oninput="filterProcs(this.value)">
       <button onclick="refreshProcs()" style="padding:6px 12px;background:rgba(105,240,174,.2);border:none;border-radius:6px;color:#69f0ae;cursor:pointer">刷新</button>
     </div>
-    <div class="pr ph"><span class="pn">名称</span><span class="pc">CPU</span><span class="pm">内存</span><span style="width:50px;text-align:right">PID</span></div>
-    <div id="procList" style="max-height:350px;overflow-y:auto;-webkit-overflow-scrolling:touch;touch-action:pan-y"></div>
+    <div class="pr ph" style="cursor:pointer"><span class="pn" onclick="sortProcs('name')">名称 ⇅</span><span class="pc" onclick="sortProcs('cpu')">CPU ⇅</span><span class="pm" onclick="sortProcs('mem')">内存 ⇅</span><span style="width:50px;text-align:right;cursor:pointer" onclick="sortProcs('pid')">PID ⇅</span></div>
+    <div id="procList" style="max-height:70vh;min-height:200px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;touch-action:pan-y;overscroll-behavior:contain"></div>
     <div style="padding:8px 10px;font-size:12px;color:#888;border-top:1px solid rgba(255,255,255,.06)"><span id="procCount">加载中...</span></div>
   </div>
 </div>
@@ -416,7 +426,7 @@ body{font-family:'Maple',-apple-system,sans-serif;background:#0a0a1a;color:#e0e0
     </div>
     <div class="exp-quick" id="expQuick"></div>
     <div class="exp-header"><span class="exp-hname">名称</span><span class="exp-hsize">大小</span><span class="exp-htime">修改时间</span></div>
-    <div id="expList" style="max-height:350px;overflow-y:auto;-webkit-overflow-scrolling:touch;touch-action:pan-y"></div>
+    <div id="expList" style="max-height:60vh;min-height:200px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;touch-action:pan-y"></div>
     <div class="exp-status"><span id="expStatus">就绪</span><span id="expCount"></span></div>
   </div>
 </div>
@@ -674,6 +684,17 @@ async function procForceKill(){
 }
 setInterval(()=>{if(!document.hidden)refreshProcs();},10000);
 setTimeout(refreshProcs,2000);
+
+let procSortKey='cpu',procSortDir=-1;
+function sortProcs(key){
+  if(procSortKey===key)procSortDir*=-1;
+  else{procSortKey=key;procSortDir=-1;}
+  const sorted=[...allProcs].sort((a,b)=>{
+    if(key==='name')return procSortDir*a.name.localeCompare(b.name);
+    return procSortDir*((a[key]||0)-(b[key]||0));
+  });
+  renderProcs(sorted);
+}
 </script>
 </body>
 </html>"""
@@ -760,6 +781,16 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;displ
 .login-box button{width:100%;padding:12px;background:linear-gradient(135deg,#667eea,#764ba2);border:none;border-radius:8px;color:#fff;font-size:16px;font-weight:600;cursor:pointer}
 .login-box button:active{transform:scale(.98)}
 .error{color:#ff8a80;font-size:13px;margin-bottom:12px;display:none}
+
+.drive-card{background:linear-gradient(135deg,rgba(255,255,255,.06),rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:16px;margin-bottom:12px;cursor:pointer;transition:all .2s}
+.drive-card:hover{border-color:rgba(105,240,174,.3);transform:translateY(-1px)}
+.drive-card:active{transform:scale(.98)}
+.drive-card-header{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.drive-card-icon{font-size:28px}
+.drive-card-letter{font-size:22px;font-weight:700;color:#69f0ae}
+.drive-card-pct{margin-left:auto;font-size:20px;font-weight:600;color:#ccc}
+.drive-card-bar{background:rgba(255,255,255,.08);border-radius:8px;height:10px;overflow:hidden;margin-bottom:8px}
+.drive-card-info{font-size:12px;color:#888}
 </style>
 </head>
 <body>
@@ -779,6 +810,17 @@ function login(){
     if(d.ok)location.reload();
     else{document.getElementById("err").style.display="block";document.getElementById("pwd").value="";document.getElementById("pwd").focus()}
   }).catch(()=>{document.getElementById("err").textContent="网络错误";document.getElementById("err").style.display="block"})
+}
+
+let procSortKey='cpu',procSortDir=-1;
+function sortProcs(key){
+  if(procSortKey===key)procSortDir*=-1;
+  else{procSortKey=key;procSortDir=-1;}
+  const sorted=[...allProcs].sort((a,b)=>{
+    if(key==='name')return procSortDir*a.name.localeCompare(b.name);
+    return procSortDir*((a[key]||0)-(b[key]||0));
+  });
+  renderProcs(sorted);
 }
 </script>
 </body>
