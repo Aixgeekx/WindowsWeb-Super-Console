@@ -10,8 +10,11 @@ import os
 import html
 import time
 import json
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs, unquote
+import mimetypes
+import shutil
+import uuid
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs, unquote, quote
 import sys
 try:
     import psutil
@@ -21,6 +24,9 @@ except:
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9999
 PASSWORD = "999"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CC_SESSIONS_DIR = os.path.join(BASE_DIR, "ccweb_sessions")
+CC_AGENT_TIMEOUT = 180
 
 # ─── 系统信息采集 ───
 
@@ -139,6 +145,132 @@ def get_top_processes(n=8):
 def get_gpu_info():
     return run_ps("(Get-CimInstance Win32_VideoController | Where-Object Name -notmatch 'Oray|Remote|Virtual|Display|Basic' | Select-Object -First 1).Name") or "N/A"
 
+# ─── CC-Web 内置会话 ───
+
+def cc_now():
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+def cc_iso():
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+def cc_session_path(session_id):
+    safe = "".join(ch for ch in str(session_id) if ch.isalnum() or ch in "-_")
+    return os.path.join(CC_SESSIONS_DIR, safe + ".json")
+
+def cc_load_session(session_id):
+    try:
+        with open(cc_session_path(session_id), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return None
+
+def cc_save_session(session):
+    os.makedirs(CC_SESSIONS_DIR, exist_ok=True)
+    with open(cc_session_path(session["id"]), "w", encoding="utf-8") as f:
+        json.dump(session, f, ensure_ascii=False, indent=2)
+
+def cc_public_session(session):
+    return {
+        "id": session["id"],
+        "title": session.get("title") or "新会话",
+        "agent": session.get("agent", "codex"),
+        "mode": session.get("mode", "yolo"),
+        "cwd": session.get("cwd") or "",
+        "updated": session.get("updated") or "",
+        "messages": session.get("messages", []),
+    }
+
+def cc_list_sessions():
+    os.makedirs(CC_SESSIONS_DIR, exist_ok=True)
+    sessions = []
+    for name in os.listdir(CC_SESSIONS_DIR):
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(CC_SESSIONS_DIR, name), "r", encoding="utf-8") as f:
+                sessions.append(json.load(f))
+        except:
+            continue
+    sessions.sort(key=lambda s: s.get("updated", ""), reverse=True)
+    return [cc_public_session(s) for s in sessions]
+
+def cc_create_session(agent="codex", cwd="", mode="yolo"):
+    agent = agent if agent in ("codex", "claude") else "codex"
+    mode = mode if mode in ("yolo", "default", "plan") else "yolo"
+    cwd = os.path.abspath(cwd) if cwd and os.path.isdir(cwd) else os.path.expanduser("~")
+    session = {
+        "id": str(uuid.uuid4()),
+        "title": "新会话",
+        "agent": agent,
+        "mode": mode,
+        "cwd": cwd,
+        "messages": [],
+        "created": cc_iso(),
+        "updated": cc_iso(),
+    }
+    cc_save_session(session)
+    return session
+
+def cc_cli_exists(name):
+    return bool(shutil.which(name))
+
+def cc_build_command(agent, prompt, cwd, mode):
+    if agent == "claude":
+        if not cc_cli_exists("claude"):
+            return None, "找不到 Claude CLI，请确认本机已安装并登录 claude。"
+        cmd = ["claude", "-p"]
+        if mode == "yolo":
+            cmd.append("--dangerously-skip-permissions")
+        elif mode in ("plan", "default"):
+            cmd.extend(["--permission-mode", mode])
+        cmd.append(prompt)
+        return cmd, None
+
+    if not cc_cli_exists("codex"):
+        return None, "找不到 Codex CLI，请确认本机已安装并登录 codex。"
+    cmd = ["codex", "exec", "--skip-git-repo-check"]
+    if mode == "yolo":
+        cmd.append("--dangerously-bypass-approvals-and-sandbox")
+    elif mode == "default":
+        cmd.append("--full-auto")
+    elif mode == "plan":
+        cmd.extend(["-s", "read-only"])
+    if cwd and os.path.isdir(cwd):
+        cmd.extend(["-C", cwd])
+    cmd.append(prompt)
+    return cmd, None
+
+def cc_run_agent(session, prompt):
+    agent = session.get("agent", "codex")
+    cwd = session.get("cwd") or os.path.expanduser("~")
+    mode = session.get("mode", "yolo")
+    if not os.path.isdir(cwd):
+        cwd = os.path.expanduser("~")
+    cmd, err = cc_build_command(agent, prompt, cwd, mode)
+    if err:
+        return {"ok": False, "error": err}
+    try:
+        r = subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=CC_AGENT_TIMEOUT,
+            encoding="utf-8",
+            errors="replace",
+            shell=False,
+        )
+        out = (r.stdout or "").strip()
+        if r.stderr:
+            out = (out + "\n\n" if out else "") + r.stderr.strip()
+        if not out:
+            out = "(no output)"
+        return {"ok": r.returncode == 0, "output": out, "returncode": r.returncode}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"{agent} 执行超时（{CC_AGENT_TIMEOUT}s）"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 # ─── 保持屏幕唤醒 ───
 
 keep_screen_alive = False
@@ -153,20 +285,29 @@ def set_keep_screen_alive(enable):
 
 def take_screenshot():
     ps_script = '''
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
     Add-Type @"
+    using System;
     using System.Runtime.InteropServices;
     public class DpiFix {
-        [DllImport("user32.dll")]
-        public static extern bool SetProcessDPIAware();
+        [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+        [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
+        [DllImport("user32.dll")] public static extern int GetSystemMetrics(int nIndex);
     }
 "@
-    [DpiFix]::SetProcessDPIAware() | Out-Null
-    $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
-    $bmp = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
+    try { [DpiFix]::SetProcessDpiAwarenessContext([IntPtr](-4)) | Out-Null } catch { [DpiFix]::SetProcessDPIAware() | Out-Null }
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    $x = [DpiFix]::GetSystemMetrics(76)
+    $y = [DpiFix]::GetSystemMetrics(77)
+    $w = [DpiFix]::GetSystemMetrics(78)
+    $h = [DpiFix]::GetSystemMetrics(79)
+    if ($w -le 0 -or $h -le 0) {
+        $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+        $x = $b.Left; $y = $b.Top; $w = $b.Width; $h = $b.Height
+    }
+    $bmp = New-Object System.Drawing.Bitmap($w, $h, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+    $g.CopyFromScreen($x, $y, 0, 0, [System.Drawing.Size]::new($w, $h), [System.Drawing.CopyPixelOperation]::SourceCopy)
     $ms = New-Object System.IO.MemoryStream
     $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Jpeg)
     [Convert]::ToBase64String($ms.ToArray())
@@ -183,6 +324,21 @@ def take_screenshot():
 # ─── 文件浏览 ───
 
 def get_drives():
+    if hasattr(os, "listdrives"):
+        drives = []
+        for drive_path in os.listdrives():
+            try:
+                usage = shutil.disk_usage(drive_path)
+            except:
+                continue
+            letter = drive_path[:1].upper() if len(drive_path) >= 2 and drive_path[1] == ":" else drive_path.rstrip("\\/")
+            drives.append({
+                "letter": letter,
+                "used": round(usage.used / 1073741824, 1),
+                "free": round(usage.free / 1073741824, 1),
+            })
+        if drives:
+            return drives
     out = run_ps('Get-PSDrive -PSProvider FileSystem | ForEach-Object { "$($_.Name)|$([math]::Round($_.Used/1GB,1))|$([math]::Round($_.Free/1GB,1))" }')
     drives = []
     for line in out.split("\n"):
@@ -288,17 +444,45 @@ HTML = r"""<!DOCTYPE html>
 <style>
 
 @font-face{font-family:'Maple';src:url('/font.ttf') format('truetype');font-weight:normal;font-style:normal}
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Maple',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0a1a;color:#e0e0e0;padding:16px;padding-bottom:80px}
-.hdr{text-align:center;padding:20px 0 16px;border-bottom:1px solid rgba(255,255,255,.08);margin-bottom:16px}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{font-family:'Maple',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0a1a;color:#e0e0e0;padding:16px;padding-bottom:80px;background-image:radial-gradient(ellipse at 20% 50%,rgba(105,240,174,.04) 0%,transparent 50%),radial-gradient(ellipse at 80% 20%,rgba(100,126,234,.04) 0%,transparent 50%),radial-gradient(ellipse at 50% 80%,rgba(118,75,162,.03) 0%,transparent 50%)}
+body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:radial-gradient(circle at 30% 40%,rgba(105,240,174,.06) 0%,transparent 40%),radial-gradient(circle at 70% 60%,rgba(64,196,255,.04) 0%,transparent 40%);animation:meshMove 20s ease-in-out infinite alternate;pointer-events:none;z-index:-1}
+body::after{content:'';position:fixed;top:0;left:0;width:2px;height:2px;background:transparent;box-shadow:25vw 15vh rgba(105,240,174,.15),75vw 25vh rgba(105,240,174,.1),10vw 70vh rgba(105,240,174,.12),60vw 80vh rgba(105,240,174,.08),40vw 45vh rgba(100,126,234,.1),85vw 60vh rgba(100,126,234,.08),15vw 35vh rgba(118,75,162,.1),50vw 10vh rgba(105,240,174,.06),90vw 90vh rgba(100,126,234,.06),30vw 55vh rgba(105,240,174,.09);animation:floatParticles 30s ease-in-out infinite alternate;pointer-events:none;z-index:-1}
+@keyframes meshMove{0%{transform:translate(0,0) scale(1)}50%{transform:translate(-20px,15px) scale(1.05)}100%{transform:translate(10px,-10px) scale(1)}}
+@keyframes floatParticles{0%{transform:translate(0,0)}25%{transform:translate(-10px,15px)}50%{transform:translate(8px,-12px)}75%{transform:translate(-5px,8px)}100%{transform:translate(3px,-5px)}}
+@keyframes cardIn{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}
+@keyframes shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
+@keyframes tabFadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+@keyframes statusPulse{0%,100%{opacity:1;box-shadow:0 0 6px rgba(0,200,83,.6),0 0 12px rgba(0,200,83,.3)}50%{opacity:.5;box-shadow:0 0 2px rgba(0,200,83,.3),0 0 4px rgba(0,200,83,.1)}}
+@keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+@keyframes blink{0%,100%{opacity:.7}50%{opacity:0}}
+@keyframes captureFlash{0%{opacity:0}20%{opacity:1}100%{opacity:0}}
+@keyframes captureSlideIn{from{opacity:0;transform:scale(.9) translateY(10px)}to{opacity:1;transform:scale(1) translateY(0)}}
+@keyframes ccPop{from{opacity:0;transform:translateY(6px) scale(.99)}to{opacity:1;transform:none}}
+@keyframes pillGlow{0%,100%{box-shadow:0 0 4px rgba(105,240,174,.15)}50%{box-shadow:0 0 10px rgba(105,240,174,.25)}}
+.hdr{text-align:center;padding:20px 0 16px;border-bottom:1px solid rgba(255,255,255,.08);margin-bottom:16px;animation:cardIn .5s ease both}
 .hdr h1{font-size:20px;font-weight:600}
 .hdr .sub{font-size:13px;color:#888;margin-top:4px}
-.card{background:rgba(255,255,255,.04);border-radius:12px;padding:16px;margin-bottom:12px;border:1px solid rgba(255,255,255,.06)}
+.card{background:rgba(255,255,255,.04);border-radius:12px;padding:16px;margin-bottom:12px;border:1px solid rgba(255,255,255,.06);transition:transform .15s ease,border-color .3s,box-shadow .3s;animation:cardIn .5s ease both}
+.card:active{transform:scale(.97);border-color:rgba(105,240,174,.3);box-shadow:0 0 20px rgba(105,240,174,.08),inset 0 0 20px rgba(105,240,174,.03)}
+#tab-status .row:nth-child(1) .card:nth-child(1){animation-delay:.05s}
+#tab-status .row:nth-child(1) .card:nth-child(2){animation-delay:.1s}
+#tab-status .row:nth-child(2) .card:nth-child(1){animation-delay:.15s}
+#tab-status .row:nth-child(2) .card:nth-child(2){animation-delay:.2s}
+#tab-status > .card:nth-child(3){animation-delay:.25s}
+#tab-status > .card:nth-child(4){animation-delay:.3s}
+#tab-status .row:nth-child(4) .card:nth-child(1){animation-delay:.35s}
+#tab-status .row:nth-child(4) .card:nth-child(2){animation-delay:.4s}
+#tab-status > #procCard{animation-delay:.45s}
 .ct{font-size:13px;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px}
 .bw{background:rgba(255,255,255,.08);border-radius:6px;height:22px;position:relative;overflow:hidden;margin-bottom:8px}
-.bf{height:100%;border-radius:6px;transition:width .6s}
-.bf.g{background:linear-gradient(90deg,#00c853,#69f0ae)}.bf.y{background:linear-gradient(90deg,#ffc107,#ffeb3b)}.bf.r{background:linear-gradient(90deg,#ff5252,#ff8a80)}
-.bl{position:absolute;right:10px;top:50%;transform:translateY(-50%);font-size:12px;font-weight:600;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.5)}
+.bf{height:100%;border-radius:6px;transition:width .6s ease;position:relative;overflow:hidden}
+.bf::after{content:'';position:absolute;top:0;left:0;right:0;bottom:0;background:linear-gradient(90deg,transparent 0%,rgba(255,255,255,.15) 50%,transparent 100%);animation:shimmer 2s ease-in-out infinite}
+.bf.g{background:linear-gradient(90deg,#00c853,#69f0ae);box-shadow:0 0 8px rgba(105,240,174,.4)}
+.bf.y{background:linear-gradient(90deg,#ffc107,#ffeb3b);box-shadow:0 0 8px rgba(255,235,59,.4)}
+.bf.r{background:linear-gradient(90deg,#ff5252,#ff8a80);box-shadow:0 0 8px rgba(255,138,128,.4)}
+.bl{position:absolute;right:10px;top:50%;transform:translateY(-50%);font-size:12px;font-weight:600;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.5);z-index:2}
 .bnum{font-size:36px;font-weight:700;line-height:1}.bnum .u{font-size:16px;font-weight:400;color:#888}
 .si{font-size:13px;color:#888;margin-top:4px}
 .row{display:flex;gap:10px}.row .card{flex:1;text-align:center}
@@ -311,19 +495,23 @@ body{font-family:'Maple',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans
 .pm{width:70px;text-align:right;color:#90caf9;font-weight:500}
 .ph{font-size:11px;color:#666;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid rgba(255,255,255,.08);padding-bottom:6px;margin-bottom:4px}
 .gpu{font-size:14px;color:#ccc}
-.tabs{display:flex;gap:0;margin-bottom:12px;background:rgba(255,255,255,.04);border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,.06)}
+.tabs{display:flex;gap:0;margin-bottom:12px;background:rgba(255,255,255,.04);border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,.06);animation:cardIn .5s ease both;animation-delay:.02s}
 .tab{flex:1;padding:10px;text-align:center;font-size:13px;font-weight:500;cursor:pointer;color:#888;transition:all .2s}
-.tab.active{background:rgba(105,240,174,.15);color:#69f0ae}
-.tab-content{display:none}.tab-content.active{display:block}
-.sbtn{display:inline-flex;align-items:center;gap:6px;padding:10px 18px;border:none;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;color:#fff;background:linear-gradient(135deg,#667eea,#764ba2);margin:4px}
-.sbtn:disabled{opacity:.5}.sbtn:active{transform:scale(.95)}
-.tbox{display:none;margin-top:12px;background:#0d0d0d;border-radius:8px;border:1px solid rgba(255,255,255,.1);overflow:hidden}
+.tab.active{background:rgba(105,240,174,.15);color:#69f0ae;box-shadow:inset 0 0 12px rgba(105,240,174,.1)}
+.tab-content{display:none}.tab-content.active{display:block;animation:tabFadeIn .3s ease}
+.sbtn{display:inline-flex;align-items:center;gap:6px;padding:10px 18px;border:none;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;color:#fff;background:linear-gradient(135deg,#667eea,#764ba2);margin:4px;transition:transform .15s,box-shadow .15s;box-shadow:0 4px 16px rgba(102,126,234,.2)}
+.sbtn:disabled{opacity:.5}.sbtn:active{transform:scale(.93);box-shadow:0 2px 8px rgba(102,126,234,.15)}
+.ss-flash{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(255,255,255,.15);z-index:9999;animation:captureFlash .4s ease-out forwards;pointer-events:none}
+#ssImg{width:100%;height:auto;display:block;border-radius:8px;animation:captureSlideIn .4s ease both}
+.tbox{display:none;margin-top:12px;background:#0d0d0d;border-radius:8px;border:1px solid rgba(105,240,174,.15);overflow:hidden;box-shadow:0 0 30px rgba(105,240,174,.05),inset 0 0 30px rgba(0,0,0,.3)}
 .thdr{background:rgba(255,255,255,.06);padding:8px 12px;font-size:12px;color:#888;display:flex;align-items:center;justify-content:space-between}
 .thdr .x{background:none;border:none;color:#888;font-size:18px;cursor:pointer;padding:0 4px}
-.tout{padding:12px;max-height:400px;overflow-y:auto;font-family:"Cascadia Mono","Consolas",monospace;font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-all;color:#d4d4d4}
+.tout{padding:12px;max-height:400px;overflow-y:auto;font-family:"Cascadia Mono","Consolas",monospace;font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-all;color:#d4d4d4;position:relative}
+.tout::before{content:'';position:absolute;top:0;left:0;right:0;bottom:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.03) 2px,rgba(0,0,0,.03) 4px);pointer-events:none;z-index:1}
 .tout::-webkit-scrollbar{width:6px}.tout::-webkit-scrollbar-thumb{background:rgba(255,255,255,.15);border-radius:3px}
 .trow{display:flex;align-items:center;padding:8px 12px;border-top:1px solid rgba(255,255,255,.08);gap:8px}
 .tp{color:#69f0ae;font-family:monospace;font-size:13px;white-space:nowrap}
+.tp::after{content:'\2588';animation:blink 1s step-end infinite;font-size:11px;opacity:.7}
 .ti{flex:1;background:none;border:none;color:#fff;font-family:monospace;font-size:13px;outline:none}
 .ts{background:#69f0ae;border:none;color:#000;padding:4px 12px;border-radius:4px;font-size:12px;font-weight:600;cursor:pointer}
 .flist{max-height:500px;overflow-y:auto}
@@ -334,9 +522,9 @@ body{font-family:'Maple',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans
 .fname{flex:1;color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fsize{width:80px;text-align:right;color:#888;font-size:12px}
 .fdate{width:100px;text-align:right;color:#666;font-size:12px}
-.footer{position:fixed;bottom:0;left:0;right:0;text-align:center;padding:12px;background:rgba(10,10,26,.95);backdrop-filter:blur(10px);border-top:1px solid rgba(255,255,255,.06);font-size:12px;color:#666}
+.footer{position:fixed;bottom:0;left:0;right:0;text-align:center;padding:12px;background:rgba(10,10,26,.95);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-top:1px solid rgba(105,240,174,.08);font-size:12px;color:#666;box-shadow:0 -4px 20px rgba(105,240,174,.03)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-.ld{display:inline-block;width:6px;height:6px;background:#00c853;border-radius:50%;margin-right:4px;animation:pulse 2s infinite}
+.ld{display:inline-block;width:8px;height:8px;background:#00c853;border-radius:50%;margin-right:6px;animation:statusPulse 2s ease-in-out infinite}
 @keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
 .loading{animation:spin 1s linear infinite;display:inline-block}
 .drive-item{display:flex;align-items:center;padding:12px 8px;border-bottom:1px solid rgba(255,255,255,.04);cursor:pointer;transition:background .15s}
@@ -363,14 +551,16 @@ body{font-family:'Maple',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans
 .exp-header .exp-hname{flex:1}
 .exp-header .exp-hsize{width:80px;text-align:right}
 .exp-header .exp-htime{width:120px;text-align:right}
-.exp-item{display:flex;align-items:center;padding:10px;border-bottom:1px solid rgba(255,255,255,.04);cursor:pointer;transition:background .15s;border-radius:4px;touch-action:manipulation;user-select:none;-webkit-user-select:none}
+.exp-item{display:flex;align-items:center;padding:10px;border-bottom:1px solid rgba(255,255,255,.04);cursor:pointer;transition:background .15s,transform .15s;border-radius:4px;touch-action:manipulation;user-select:none;-webkit-user-select:none}
 .exp-item:hover{background:rgba(255,255,255,.06)}
+.exp-item:active{background:rgba(105,240,174,.12);transform:scale(.98)}
 .exp-item.selected{background:rgba(105,240,174,.15)}
 .exp-item .exp-icon{width:24px;text-align:center;font-size:16px;margin-right:8px}
 .exp-item .exp-name{flex:1;color:#ccc;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .exp-item .exp-size{width:80px;text-align:right;color:#888;font-size:12px}
 .exp-item .exp-time{width:120px;text-align:right;color:#666;font-size:12px}
-.exp-context{position:fixed;background:rgba(30,30,50,.95);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:4px 0;min-width:160px;z-index:1000;display:none;box-shadow:0 4px 20px rgba(0,0,0,.5)}
+.exp-context{position:fixed;background:rgba(30,30,50,.95);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:4px 0;min-width:160px;z-index:1000;opacity:0;transform:scale(.9) translateY(-5px);transform-origin:top left;pointer-events:none;transition:opacity .15s ease,transform .15s ease;box-shadow:0 8px 32px rgba(0,0,0,.5)}
+.exp-context.visible{opacity:1;transform:scale(1) translateY(0);pointer-events:auto}
 .exp-context-item{padding:8px 16px;font-size:13px;color:#ccc;cursor:pointer;transition:background .15s}
 .exp-context-item:hover{background:rgba(105,240,174,.15)}
 .exp-context-divider{height:1px;background:rgba(255,255,255,.1);margin:4px 0}
@@ -378,9 +568,9 @@ body{font-family:'Maple',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans
 
 /* 磁盘大卡片 - 醒目可视化 */
 .drive-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin-bottom:16px}
-.drive-card{position:relative;overflow:hidden;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:0;cursor:pointer;transition:all .25s}
+.drive-card{position:relative;overflow:hidden;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:0;cursor:pointer;transition:all .25s;animation:cardIn .5s ease both}
 .drive-card:hover{border-color:rgba(105,240,174,.4);transform:translateY(-2px);box-shadow:0 8px 32px rgba(105,240,174,.1)}
-.drive-card:active{transform:scale(.97)}
+.drive-card:active{transform:scale(.97);box-shadow:0 0 24px rgba(105,240,174,.15)}
 .drive-card-bg{position:absolute;bottom:0;left:0;right:0;border-radius:0 0 16px 16px;transition:height .8s ease;opacity:.15}
 .drive-card-body{position:relative;padding:20px;display:flex;align-items:center;gap:16px}
 .drive-ring{position:relative;width:80px;height:80px;flex-shrink:0}
@@ -406,6 +596,46 @@ body{font-family:'Maple',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans
 .drive-r .drive-letter{color:#ff8a80}
 .drive-r .ring-fg,.drive-r .drive-bar-fill{stroke:#ff8a80;background:#ff8a80}
 .drive-r .drive-card-bg{background:linear-gradient(to top,#ff8a80,#ff5252)}
+
+/* Built-in CC-Web */
+.cc-shell{display:grid;grid-template-columns:220px 1fr;min-height:70vh;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.08);border-radius:12px;overflow:hidden}
+.cc-side{border-right:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.14);display:flex;flex-direction:column}
+.cc-new{margin:12px;padding:10px 12px;border:0;border-radius:8px;background:linear-gradient(135deg,#69f0ae,#40c4ff);color:#061012;font-weight:800;cursor:pointer;box-shadow:0 8px 24px rgba(64,196,255,.16)}
+.cc-list{flex:1;overflow:auto;padding:0 8px 12px}
+.cc-session{width:100%;text-align:left;border:1px solid transparent;background:transparent;color:#bbb;border-radius:8px;padding:10px;margin-bottom:6px;cursor:pointer;transition:all .18s}
+.cc-session:hover{background:rgba(255,255,255,.06);transform:translateX(2px)}
+.cc-session.active{background:rgba(105,240,174,.13);border-color:rgba(105,240,174,.28);color:#fff}
+.cc-session b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px}
+.cc-session span{display:block;color:#888;font-size:11px;margin-top:3px}
+.cc-main{display:flex;flex-direction:column;min-width:0}
+.cc-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:12px;border-bottom:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)}
+.cc-head select,.cc-head input{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:8px;color:#eee;padding:8px 10px;outline:none}
+.cc-head input{flex:1;min-width:180px;font-family:monospace}
+.cc-pill{padding:7px 10px;border-radius:999px;background:rgba(105,240,174,.12);color:#69f0ae;font-size:12px;border:1px solid rgba(105,240,174,.2);animation:pillGlow 3s ease-in-out infinite}
+.cc-messages{flex:1;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:12px;min-height:320px;max-height:64vh}
+.cc-msg{max-width:92%;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.08);animation:ccPop .2s ease both;white-space:pre-wrap;word-break:break-word;line-height:1.55}
+.cc-msg.user{align-self:flex-end;background:linear-gradient(135deg,rgba(105,240,174,.2),rgba(64,196,255,.13));color:#fff}
+.cc-msg.assistant{align-self:flex-start;background:rgba(255,255,255,.055);color:#ddd}
+.cc-msg.system{align-self:center;background:rgba(255,235,59,.1);color:#ffec99;font-size:12px}
+.cc-input{display:flex;gap:8px;padding:12px;border-top:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.12)}
+.cc-input textarea{flex:1;min-height:54px;max-height:160px;resize:vertical;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:10px;color:#fff;padding:10px;outline:none}
+.cc-send{width:76px;border:0;border-radius:10px;background:linear-gradient(135deg,#7c4dff,#40c4ff);color:white;font-weight:800;cursor:pointer}
+.cc-send:disabled{opacity:.5;cursor:wait}
+@keyframes ccPop{from{opacity:0;transform:translateY(6px) scale(.99)}to{opacity:1;transform:none}}
+.card:hover{border-color:rgba(105,240,174,.18);box-shadow:0 10px 34px rgba(0,0,0,.22),0 0 28px rgba(105,240,174,.07);transform:translateY(-1px)}
+.tab.active{position:relative;overflow:hidden}
+.tab.active:after{content:'';position:absolute;left:12%;right:12%;bottom:0;height:2px;background:linear-gradient(90deg,transparent,#69f0ae,#40c4ff,transparent);animation:tabScan 2.2s ease-in-out infinite}
+.drive-ring .ring-fg{filter:drop-shadow(0 0 6px currentColor)}
+.cc-shell{position:relative}
+.cc-shell:before{content:'';position:absolute;inset:0;background:linear-gradient(120deg,transparent,rgba(105,240,174,.04),transparent);transform:translateX(-120%);animation:ccSweep 5s ease-in-out infinite;pointer-events:none}
+.cc-new,.cc-send{animation:pillGlow 3s ease-in-out infinite}
+@keyframes tabScan{0%,100%{transform:translateX(-30%);opacity:.4}50%{transform:translateX(30%);opacity:1}}
+@keyframes ccSweep{0%,55%{transform:translateX(-120%)}100%{transform:translateX(120%)}}
+@media(max-width:375px){body{padding:10px;padding-bottom:70px}.hdr h1{font-size:17px}.hdr .sub{font-size:11px}.bnum{font-size:28px}.bnum .u{font-size:13px}.card{padding:12px;margin-bottom:10px;border-radius:10px}.ct{font-size:11px}.tab{padding:8px 4px;font-size:12px}.row{gap:8px}.drive-card-body{padding:14px;gap:12px}.drive-ring{width:64px;height:64px}.drive-ring svg{width:64px;height:64px}.drive-ring-pct{font-size:16px}.drive-letter{font-size:20px}.sbtn{padding:8px 14px;font-size:13px}.exp-item{padding:8px 6px}.exp-item .exp-time{display:none}.exp-header .exp-htime{display:none}}
+@media(min-width:376px) and (max-width:768px){body{padding:14px;padding-bottom:76px}.hdr h1{font-size:19px}.bnum{font-size:32px}}
+@media(max-width:700px){.cc-shell{grid-template-columns:1fr}.cc-side{border-right:0;border-bottom:1px solid rgba(255,255,255,.08);max-height:190px}.cc-messages{max-height:58vh}.cc-input textarea{min-height:44px}}
+@media(max-height:500px) and (orientation:landscape){.hdr{padding:10px 0 8px}.hdr h1{font-size:16px}.tabs{margin-bottom:8px}.tab{padding:6px;font-size:12px}.cc-messages{max-height:40vh}}
+@media(prefers-reduced-motion:reduce){.card,.drive-card,.tab,.hdr,.tabs{animation:none!important}.bf::after{animation:none}.ld{animation:pulse 2s infinite}.cc-pill{animation:none}body::before{animation:none}body::after{animation:none}.exp-context{transition:none}.tab-content.active{animation:none}}
 </style>
 </head>
 <body>
@@ -505,8 +735,28 @@ body{font-family:'Maple',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans
 
 <!-- CC-Web -->
 <div class="tab-content" id="tab-ccweb">
-  <div class="card" style="text-align:center;padding:0;overflow:hidden">
-    <iframe id="ccwebFrame" src="about:blank" style="width:100%;height:75vh;border:none;border-radius:8px;background:#1a1a2e" loading="lazy" allow="clipboard-read;clipboard-write"></iframe>
+  <div class="card" style="padding:0;overflow:hidden">
+    <div class="cc-shell">
+      <aside class="cc-side">
+        <button class="cc-new" onclick="ccNewSession()">+ 新会话</button>
+        <div class="cc-list" id="ccSessionList"></div>
+      </aside>
+      <section class="cc-main">
+        <div class="cc-head">
+          <select id="ccAgent"><option value="codex">Codex</option><option value="claude">Claude</option></select>
+          <select id="ccMode"><option value="yolo">YOLO</option><option value="default">默认</option><option value="plan">Plan</option></select>
+          <input id="ccCwd" placeholder="工作目录，例如 D:\Aix\WindowsWeb-Super-Console">
+          <span class="cc-pill" id="ccState">就绪</span>
+        </div>
+        <div class="cc-messages" id="ccMessages">
+          <div class="cc-msg system">内置 CC-Web 已合并到本服务。选择 Agent 后即可发送任务，不再启动外部 8002 服务。</div>
+        </div>
+        <div class="cc-input">
+          <textarea id="ccInput" placeholder="输入给 Claude / Codex 的任务，支持 /clear、/cwd、/mode、/help"></textarea>
+          <button class="cc-send" id="ccSend" onclick="ccSend()">发送</button>
+        </div>
+      </section>
+    </div>
   </div>
 </div>
 
@@ -518,8 +768,25 @@ function switchTab(n){
   document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['status','files','tools','ccweb'][i]===n));
   document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
   document.getElementById('tab-'+n).classList.add('active');
-  if(n==='ccweb'){var f=document.getElementById('ccwebFrame');if(f.src==='about:blank'||!f.src) f.src='http://'+location.hostname+':8002';}
+  if(n==='ccweb')ccLoad();
   if(n==='files')expLoad();
+}
+
+// Animated number counting
+const _animState={};
+function animateValue(el,end,suffix,dur){
+  const key=el.id||el.className;
+  const start=_animState[key]||0;
+  _animState[key]=end;
+  if(start===end)return;
+  const st=performance.now();
+  (function tick(now){
+    const p=Math.min((now-st)/(dur||400),1);
+    const ease=1-Math.pow(1-p,3);
+    const v=Math.round(start+(end-start)*ease);
+    el.innerHTML=v+'<span class="u">'+suffix+'</span>';
+    if(p<1)requestAnimationFrame(tick);
+  })(st);
 }
 
 // AJAX refresh
@@ -530,8 +797,8 @@ async function sched(){
     if(document.hidden)return;
     try{
       const d=await(await fetch('/api')).json();
-      document.querySelector('#tab-status .row .card:first-child .bnum').innerHTML=d.cpu+'<span class="u">%</span>';
-      document.querySelector('#tab-status .row .card:last-child .bnum').innerHTML=d.mem.percent+'<span class="u">%</span>';
+      animateValue(document.querySelector('#tab-status .row .card:first-child .bnum'),d.cpu,'%');
+      animateValue(document.querySelector('#tab-status .row .card:last-child .bnum'),d.mem.percent,'%');
       document.querySelector('#tab-status .row .card:last-child .si').textContent=d.mem.used+' / '+d.mem.total+' GB';
       document.getElementById('ts').textContent=d.ts;
       document.querySelector('.hdr .sub:last-child').textContent='Uptime: '+d.uptime;
@@ -651,7 +918,7 @@ async function expLoad(){
       const pct=total>0?Math.round(parseFloat(d.used)/total*100):0;
       const bc=pct<60?'g':pct<85?'y':'r';
       const r=36,circ=2*Math.PI*r,offset=circ-(pct/100)*circ;
-      dh+=`<div class="drive-card drive-${bc}" onclick="expGo('${d.letter}:\\')">`;
+      dh+=`<div class="drive-card drive-${bc}" onclick="expGo('${d.letter}:\\\\')">`;
       dh+='<div class="drive-card-bg" style="height:'+pct+'%"></div>';
       dh+='<div class="drive-card-body">';
       dh+='<div class="drive-ring"><svg width="80" height="80" viewBox="0 0 80 80">';
@@ -667,7 +934,7 @@ async function expLoad(){
     });
     dh+='</div>';
     let qh='<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">';
-    qa.drives.forEach(d=>{qh+=`<div class="exp-quick-item" onclick="expGo('${d.letter}:\\')">${d.letter}:盘</div>`;});
+    qa.drives.forEach(d=>{qh+=`<div class="exp-quick-item" onclick="expGo('${d.letter}:\\\\')">${d.letter}:盘</div>`;});
     qh+='</div>';
     document.getElementById('expQuick').innerHTML=dh+qh;
     expGo('C:\\');
@@ -758,6 +1025,85 @@ async function procForceKill(){
   if(!confirm('强制结束 '+name+'?'))return;
   fetch('/api/terminal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd:'Stop-Process -Id '+pid+' -Force'})}).then(()=>refreshProcs());
 }
+
+// Built-in CC-Web
+let ccLoaded=false,ccSessions=[],ccCurrent=null,ccBusy=false;
+function ccEsc(s){return String(s||'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+async function ccJson(url,opt){
+  const r=await fetch(url,opt);const d=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(d.error||r.statusText);
+  return d;
+}
+async function ccLoad(){
+  if(ccLoaded)return;ccLoaded=true;
+  try{
+    const d=await ccJson('/api/ccweb/sessions');
+    ccSessions=d.sessions||[];
+    if(ccSessions.length){ccSelect(ccSessions[0].id);}
+    else{await ccNewSession();}
+  }catch(e){document.getElementById('ccState').textContent='加载失败';ccSystem(e.message);}
+}
+function ccSystem(msg){
+  const box=document.getElementById('ccMessages');
+  box.insertAdjacentHTML('beforeend','<div class="cc-msg system">'+ccEsc(msg)+'</div>');
+  box.scrollTop=box.scrollHeight;
+}
+function ccRenderSessions(){
+  const list=document.getElementById('ccSessionList');let h='';
+  ccSessions.forEach(s=>{
+    h+='<button class="cc-session '+(ccCurrent&&ccCurrent.id===s.id?'active':'')+'" data-id="'+ccEsc(s.id)+'" onclick="ccSelect(this.dataset.id)"><b>'+ccEsc(s.title||'新会话')+'</b><span>'+ccEsc((s.agent||'codex')+' · '+(s.updated||''))+'</span></button>';
+  });
+  list.innerHTML=h||'<div style="padding:12px;color:#888;font-size:12px">暂无会话</div>';
+}
+function ccRenderMessages(){
+  const box=document.getElementById('ccMessages');
+  if(!ccCurrent||!ccCurrent.messages||!ccCurrent.messages.length){
+    box.innerHTML='<div class="cc-msg system">选择 Claude 或 Codex，输入任务后发送。会话保存在本项目 ccweb_sessions 目录。</div>';
+  }else{
+    box.innerHTML=ccCurrent.messages.map(m=>'<div class="cc-msg '+ccEsc(m.role)+'">'+ccEsc(m.content)+'</div>').join('');
+  }
+  box.scrollTop=box.scrollHeight;
+}
+async function ccSelect(id){
+  const s=ccSessions.find(x=>x.id===id);if(!s)return;
+  ccCurrent=s;
+  document.getElementById('ccAgent').value=s.agent||'codex';
+  document.getElementById('ccMode').value=s.mode||'yolo';
+  document.getElementById('ccCwd').value=s.cwd||'';
+  document.getElementById('ccState').textContent='就绪';
+  ccRenderSessions();ccRenderMessages();
+}
+async function ccNewSession(){
+  const agent=document.getElementById('ccAgent')?.value||'codex';
+  const mode=document.getElementById('ccMode')?.value||'yolo';
+  const cwd=document.getElementById('ccCwd')?.value||'';
+  const d=await ccJson('/api/ccweb/sessions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agent,mode,cwd})});
+  ccSessions=[d.session].concat(ccSessions);
+  ccSelect(d.session.id);
+}
+async function ccSend(){
+  if(ccBusy)return;
+  if(!ccCurrent)await ccNewSession();
+  const inp=document.getElementById('ccInput');
+  const text=inp.value.trim();if(!text)return;
+  inp.value='';ccBusy=true;
+  document.getElementById('ccSend').disabled=true;
+  document.getElementById('ccState').textContent='运行中...';
+  try{
+    const d=await ccJson('/api/ccweb/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:ccCurrent.id,text,agent:document.getElementById('ccAgent').value,mode:document.getElementById('ccMode').value,cwd:document.getElementById('ccCwd').value})});
+    ccCurrent=d.session;
+    ccSessions=ccSessions.filter(s=>s.id!==ccCurrent.id);
+    ccSessions.unshift(ccCurrent);
+    ccRenderSessions();ccRenderMessages();
+    document.getElementById('ccState').textContent=d.ok?'完成':'有错误';
+  }catch(e){
+    ccSystem('错误: '+e.message);
+    document.getElementById('ccState').textContent='错误';
+  }finally{
+    ccBusy=false;document.getElementById('ccSend').disabled=false;
+  }
+}
+document.getElementById('ccInput').addEventListener('keydown',function(e){if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();ccSend();}});
 setInterval(()=>{if(!document.hidden)refreshProcs();},10000);
 setTimeout(refreshProcs,2000);
 
@@ -976,6 +1322,8 @@ function login(){
             if s == "on": set_keep_screen_alive(True)
             elif s == "off": set_keep_screen_alive(False)
             self.json_resp({"on": keep_screen_alive})
+        elif path == "/api/ccweb/sessions":
+            self.json_resp({"sessions": cc_list_sessions()})
         else:
             self.send_error(404)
 
@@ -1001,6 +1349,69 @@ function login(){
         # 其他POST请求需要认证
         if not self.is_logged_in():
             self.json_resp({"error": "Unauthorized"}, 401)
+            return
+
+        if path == "/api/ccweb/sessions":
+            cl = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(cl)
+            try:
+                d = json.loads(body or b"{}")
+                session = cc_create_session(d.get("agent", "codex"), d.get("cwd", ""), d.get("mode", "yolo"))
+                self.json_resp({"ok": True, "session": cc_public_session(session)})
+            except Exception as e:
+                self.json_resp({"ok": False, "error": str(e)}, 500)
+            return
+        elif path == "/api/ccweb/send":
+            cl = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(cl)
+            try:
+                d = json.loads(body or b"{}")
+                text = (d.get("text") or "").strip()
+                if not text:
+                    self.json_resp({"ok": False, "error": "消息不能为空"}, 400)
+                    return
+                session = cc_load_session(d.get("session_id")) or cc_create_session(d.get("agent", "codex"), d.get("cwd", ""), d.get("mode", "yolo"))
+                session["agent"] = d.get("agent") if d.get("agent") in ("codex", "claude") else session.get("agent", "codex")
+                session["mode"] = d.get("mode") if d.get("mode") in ("yolo", "default", "plan") else session.get("mode", "yolo")
+                if d.get("cwd") and os.path.isdir(d.get("cwd")):
+                    session["cwd"] = os.path.abspath(d.get("cwd"))
+                if session.get("title") == "新会话":
+                    session["title"] = text[:28] + ("..." if len(text) > 28 else "")
+
+                lower = text.lower()
+                session.setdefault("messages", []).append({"role": "user", "content": text, "time": cc_now()})
+                if lower == "/clear":
+                    session["messages"] = [{"role": "system", "content": "会话已清空。", "time": cc_now()}]
+                    result = {"ok": True, "output": "会话已清空。"}
+                elif lower == "/help":
+                    result = {"ok": True, "output": "内置 CC-Web 命令：/clear 清空会话，/cwd 查看目录，/cwd <路径> 切换目录，/mode <yolo|default|plan> 切换权限模式。普通消息会发送给当前 Claude/Codex CLI。"}
+                elif lower.startswith("/cwd"):
+                    new_cwd = text[4:].strip()
+                    if new_cwd:
+                        if os.path.isdir(new_cwd):
+                            session["cwd"] = os.path.abspath(new_cwd)
+                            result = {"ok": True, "output": "工作目录已切换为: " + session["cwd"]}
+                        else:
+                            result = {"ok": False, "error": "目录不存在: " + new_cwd}
+                    else:
+                        result = {"ok": True, "output": "当前工作目录: " + (session.get("cwd") or "")}
+                elif lower.startswith("/mode"):
+                    mode = text[5:].strip().lower()
+                    if mode in ("yolo", "default", "plan"):
+                        session["mode"] = mode
+                        result = {"ok": True, "output": "权限模式已切换为: " + mode}
+                    else:
+                        result = {"ok": False, "error": "用法: /mode <yolo|default|plan>"}
+                else:
+                    result = cc_run_agent(session, text)
+
+                content = result.get("output") or result.get("error") or "(no output)"
+                session["messages"].append({"role": "assistant" if result.get("ok") else "system", "content": content, "time": cc_now()})
+                session["updated"] = cc_iso()
+                cc_save_session(session)
+                self.json_resp({"ok": bool(result.get("ok")), "session": cc_public_session(session), "error": result.get("error")})
+            except Exception as e:
+                self.json_resp({"ok": False, "error": str(e)}, 500)
             return
 
         if path == "/api/mkdir":
@@ -1109,48 +1520,17 @@ function login(){
     def log_message(self, format, *args):
         print(f"[{time.strftime('%H:%M:%S')}] {args[0]}")
 
-CCWEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'Aix', 'ccweb', 'cc-web-main')
-CCWEB_PORT = 8002
-
-def start_ccweb():
-    if not os.path.isdir(CCWEB_DIR):
-        print(f"  [CC-Web] dir not found: {CCWEB_DIR}")
-        return None
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(1)
-        s.connect(('127.0.0.1', CCWEB_PORT))
-        s.close()
-        print(f"  CC-Web already running: http://localhost:{CCWEB_PORT}")
-        return None
-    except:
-        pass
-    try:
-        proc = subprocess.Popen(
-            ['node', 'server.js'],
-            cwd=CCWEB_DIR,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=0x00000008 | 0x00000200
-        )
-        print(f"  CC-Web starting (PID {proc.pid}): http://localhost:{CCWEB_PORT}")
-        return proc
-    except Exception as e:
-        print(f"  [CC-Web] failed: {e}")
-        return None
-
 def main():
     net = get_network_info()
     set_keep_screen_alive(True)
     print(f"\n  PC Monitor: http://{net['ip']}:{PORT}\n")
-    ccweb_proc = start_ccweb()
-    server = HTTPServer(("0.0.0.0", PORT), Handler)
+    print("  Built-in CC-Web merged at: / -> CC-Web tab\n")
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    server.daemon_threads = True
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         set_keep_screen_alive(False)
-        if ccweb_proc:
-            ccweb_proc.terminate()
         print("\nStopped")
         server.server_close()
 

@@ -125,8 +125,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_exe.ps1
 版本号写在 `VERSION`。推送 `v版本号` tag 后，GitHub Actions 会自动构建并发布 exe：
 
 ```bash
-git tag v1.9.3
-git push origin v1.9.3
+git tag v1.9.4
+git push origin v1.9.4
 ```
 
 ## 截图

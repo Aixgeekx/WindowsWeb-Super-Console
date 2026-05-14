@@ -12,3 +12,4 @@ find_dups.py
 test_*.py
 test_*.ps1
 no-sleep.ps1
+ccweb_sessions/
