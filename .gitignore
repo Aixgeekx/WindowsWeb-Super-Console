@@ -1,6 +1,10 @@
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
+build/
+dist/
+*.spec
+*.log
 check.py
 check2.py
 check3.py
