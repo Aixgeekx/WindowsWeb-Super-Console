@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+check.py
+check2.py
+check3.py
+find_dups.py
+test_*.py
+test_*.ps1
+no-sleep.ps1
