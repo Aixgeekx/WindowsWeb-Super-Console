@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-内网电脑状态监�?
+内网电脑状态监控
 用法: python server.py [端口号，默认9999]
 """
 
@@ -9,7 +9,6 @@ import socket
 import os
 import time
 import json
-import html
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote
 import sys
@@ -35,7 +34,7 @@ def run_ps(cmd):
         return f"Error: {e}"
 
 def get_all_system_info():
-    """一�?PowerShell 获取全部系统信息，避免多次启动进�?""
+    """一次 PowerShell 获取全部系统信息，避免多次启动进程"""
     out = run_ps('''
         $cpu = [math]::Round((Get-Counter "\\Processor(_Total)\\% Processor Time").CounterSamples.CookedValue, 1)
         $os = Get-CimInstance Win32_OperatingSystem
@@ -43,8 +42,8 @@ def get_all_system_info():
         $memFree = [math]::Round($os.FreePhysicalMemory/1MB, 2)
         $memUsed = [math]::Round($memTotal - $memFree, 2)
         $memPct = [math]::Round($memUsed / $memTotal * 100, 1)
-        $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
-        $uptimeStr = $boot.ToString('yyyy-MM-dd HH:mm:ss')
+        $uptime = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+        $uptimeStr = [math]::Round(((Get-Date) - $uptime).TotalHours, 0)
         $disks = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | ForEach-Object {
             $t = [math]::Round($_.Size/1GB, 1)
             $f = [math]::Round($_.FreeSpace/1GB, 1)
@@ -63,7 +62,7 @@ def get_all_system_info():
         foreach($d in $disks){Write-Output "DISK:$d"}
         foreach($p in $topProcs){Write-Output "TOP:$p"}
     ''')
-    info = {"cpu":0,"mem":{"used":0,"total":0,"free":0,"percent":0},"disks":[],"uptime_raw":None,"procs":0,"top":[]}
+    info = {"cpu":0,"mem":{"used":0,"total":0,"free":0,"percent":0},"disks":[],"uptime":"N/A","procs":0,"top":[]}
     for line in out.split("\n"):
         line = line.strip()
         if line.startswith("CPU:"):
@@ -75,15 +74,8 @@ def get_all_system_info():
                 info["mem"] = {"used":float(p[0]),"total":float(p[1]),"free":float(p[2]),"percent":float(p[3])}
             except: pass
         elif line.startswith("UPTIME:"):
-            raw = line[7:].strip()
-            if "-" in raw and ":" in raw:
-                # datetime string like "2026-05-14 07:26:08"
-                info["uptime_raw"] = "boot:" + raw
-            elif "-" in raw:
-                info["uptime_raw"] = raw  # d-h-m-s-boot_time format
-            else:
-                try: info["uptime_raw"] = f"0-{int(float(raw))}-0-0-" 
-                except: info["uptime_raw"] = None
+            try: info["uptime"] = f"0d {int(float(line[7:]))}h"
+            except: info["uptime"] = line[7:]
         elif line.startswith("PROCS:"):
             try: info["procs"] = int(line[6:])
             except: pass
@@ -100,19 +92,15 @@ def get_all_system_info():
     return info
 
 def get_uptime():
-    """返回 d-h-m-s-boot_time 格式的uptime字符�?""
     out = run_ps("""
         $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
         $span = (Get-Date) - $boot
         $d = [int]$span.TotalDays
         $h = $span.Hours
         $m = $span.Minutes
-        $s = $span.Seconds
-        Write-Output ($d.ToString() + '-' + $h.ToString() + '-' + $m.ToString() + '-' + $s.ToString() + '-' + $boot.ToString('yyyy-MM-dd HH:mm:ss'))
+        "${d}d ${h}h ${m}m"
     """)
-    if out and "-" in out:
-        return out.strip()
-    return None
+    return out if out else "N/A"
 
 def get_process_count():
     out = run_ps("(Get-Process).Count")
@@ -131,13 +119,13 @@ def get_network_info():
     return {"hostname": hostname, "ip": ip}
 
 def get_top_processes(n=8):
-    out = run_ps(f"""
-        Get-Process | Sort-Object CPU -Descending | Select-Object -First {n} Name, CPU, WorkingSet64 |
-        ForEach-Object {{
-            $mem = [math]::Round($_.WorkingSet64/1MB, 1)
-            "$($_.Name)|$([math]::Round($_.CPU,1))|$mem"
-        }}
-    """)
+    ps = (
+        'Get-Process | Sort-Object CPU -Descending | Select-Object -First %d Name, CPU, WorkingSet64 |'
+        ' ForEach-Object {'
+        ' $mem = [math]::Round($_.WorkingSet64/1MB, 1);'
+        ' "$($_.Name)|$([math]::Round($_.CPU,1))|$mem" }'
+    ) % n
+    out = run_ps(ps)
     procs = []
     for line in out.split("\n"):
         line = line.strip()
@@ -166,7 +154,6 @@ def take_screenshot():
     ps_script = '''
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
-    # 强制进程�?DPI 感知，取得原生分辨率
     Add-Type @"
     using System.Runtime.InteropServices;
     public class DpiFix {
@@ -241,7 +228,7 @@ def list_directory(path):
     return items, None
 
 def create_folder(path):
-    """创建文件�?""
+    """创建文件夹"""
     try:
         os.makedirs(path, exist_ok=True)
         return True, None
@@ -261,7 +248,7 @@ def delete_item(path):
         return False, str(e)
 
 def rename_item(old_path, new_path):
-    """重命名文件或文件�?""
+    """重命名文件或文件夹"""
     try:
         os.rename(old_path, new_path)
         return True, None
@@ -280,26 +267,11 @@ def get_all_status():
         return cache
     net = get_network_info()
     sysinfo = get_all_system_info()
-    uptime_raw = sysinfo.get("uptime_raw")
-    boot_ts = 0
-    if uptime_raw and uptime_raw.startswith("boot:"):
-        try:
-            bt_str = uptime_raw[5:]
-            boot_ts = time.mktime(time.strptime(bt_str, "%Y-%m-%d %H:%M:%S"))
-        except: pass
-    elif uptime_raw and "-" in uptime_raw:
-        parts = uptime_raw.split("-")
-        if len(parts) >= 5:
-            try:
-                bt_str = "-".join(parts[4:])
-                boot_ts = time.mktime(time.strptime(bt_str, "%Y-%m-%d %H:%M:%S"))
-            except: pass
     cache = {
         "cpu": sysinfo["cpu"], "mem": sysinfo["mem"], "disks": sysinfo["disks"],
-        "uptime_raw": uptime_raw, "procs": sysinfo["procs"],
+        "uptime": sysinfo["uptime"], "procs": sysinfo["procs"],
         "net": net, "gpu": get_gpu_info(), "top": sysinfo["top"],
-        "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "boot_ts": boot_ts
+        "ts": time.strftime("%Y-%m-%d %H:%M:%S")
     }
     cache_time = now
     return cache
@@ -364,11 +336,6 @@ body{font-family:'Maple',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans
 .footer{position:fixed;bottom:0;left:0;right:0;text-align:center;padding:12px;background:rgba(10,10,26,.95);backdrop-filter:blur(10px);border-top:1px solid rgba(255,255,255,.06);font-size:12px;color:#666}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 .ld{display:inline-block;width:6px;height:6px;background:#00c853;border-radius:50%;margin-right:4px;animation:pulse 2s infinite}
-@keyframes glow{0%,100%{text-shadow:0 0 4px rgba(105,240,174,.3)}50%{text-shadow:0 0 12px rgba(105,240,174,.6)}}
-#uptimeDisplay{animation:glow 3s ease-in-out infinite;font-size:14px;color:#69f0ae;font-family:monospace}
-@keyframes fadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
-.drive-card{animation:fadeIn .4s ease both}
-.drive-card:nth-child(2){animation-delay:.1s}
 @keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
 .loading{animation:spin 1s linear infinite;display:inline-block}
 .drive-item{display:flex;align-items:center;padding:12px 8px;border-bottom:1px solid rgba(255,255,255,.04);cursor:pointer;transition:background .15s}
@@ -408,7 +375,7 @@ body{font-family:'Maple',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans
 .exp-context-divider{height:1px;background:rgba(255,255,255,.1);margin:4px 0}
 .exp-status{display:flex;justify-content:space-between;padding:8px 10px;font-size:12px;color:#888;border-top:1px solid rgba(255,255,255,.06);margin-top:8px}
 
-/* 磁盘大卡�?- 醒目可视�?*/
+/* 磁盘大卡片 - 醒目可视化 */
 .drive-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin-bottom:16px}
 .drive-card{position:relative;overflow:hidden;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:0;cursor:pointer;transition:all .25s}
 .drive-card:hover{border-color:rgba(105,240,174,.4);transform:translateY(-2px);box-shadow:0 8px 32px rgba(105,240,174,.1)}
@@ -444,7 +411,7 @@ body{font-family:'Maple',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans
 <div class="hdr">
   <h1 id="hostname">{{HOSTNAME}}</h1>
   <div class="sub">{{IP}}</div>
-  <div class="sub" id="uptimeDisplay">Uptime: calculating...</div>
+  <div class="sub">{{UPTIME}}</div>
 </div>
 
 <div class="tabs">
@@ -473,29 +440,29 @@ body{font-family:'Maple',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans
       <input type="text" id="procSearch" placeholder="搜索进程..." style="flex:1;padding:6px 10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:6px;color:#fff;font-size:13px;outline:none" oninput="filterProcs(this.value)">
       <button onclick="refreshProcs()" style="padding:6px 12px;background:rgba(105,240,174,.2);border:none;border-radius:6px;color:#69f0ae;cursor:pointer">刷新</button>
     </div>
-    <div class="pr ph" style="cursor:pointer"><span class="pn" onclick="sortProcs('name')">名称 �?/span><span class="pc" onclick="sortProcs('cpu')">CPU �?/span><span class="pm" onclick="sortProcs('mem')">内存 �?/span><span style="width:50px;text-align:right;cursor:pointer" onclick="sortProcs('pid')">PID �?/span></div>
+    <div class="pr ph" style="cursor:pointer"><span class="pn" onclick="sortProcs('name')">名称 ⇅</span><span class="pc" onclick="sortProcs('cpu')">CPU ⇅</span><span class="pm" onclick="sortProcs('mem')">内存 ⇅</span><span style="width:50px;text-align:right;cursor:pointer" onclick="sortProcs('pid')">PID ⇅</span></div>
     <div id="procList" style="max-height:70vh;min-height:200px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;touch-action:pan-y;overscroll-behavior:contain"></div>
-    <div style="padding:8px 10px;font-size:12px;color:#888;border-top:1px solid rgba(255,255,255,.06)"><span id="procCount">加载�?..</span></div>
+    <div style="padding:8px 10px;font-size:12px;color:#888;border-top:1px solid rgba(255,255,255,.06)"><span id="procCount">加载中...</span></div>
   </div>
 </div>
 <!-- Process Context Menu -->
 <div class="exp-context" id="procContext">
   <div class="exp-context-item" onclick="procKill()">💀 结束进程</div>
-  <div class="exp-context-item" onclick="procForceKill()" style="color:#ff8a80">�?强制结束</div>
+  <div class="exp-context-item" onclick="procForceKill()" style="color:#ff8a80">⚡ 强制结束</div>
 </div>
 
 <!-- Explorer -->
 <div class="tab-content" id="tab-files">
   <div class="card">
-    <div class="ct">资源管理�?/div>
+    <div class="ct">资源管理器</div>
     <div class="exp-toolbar">
       <button class="exp-btn" onclick="expBack()" id="expBackBtn" title="后退">◀</button>
-      <button class="exp-btn" onclick="expForward()" id="expFwdBtn" title="前进">�?/button>
+      <button class="exp-btn" onclick="expForward()" id="expFwdBtn" title="前进">▶</button>
       <button class="exp-btn" onclick="expHome()" title="主页">🏠</button>
-      <button class="exp-btn" onclick="expUp()" title="上一�?>�?/button>
+      <button class="exp-btn" onclick="expUp()" title="上一级">⬆</button>
       <div class="exp-addr">
         <input type="text" id="expAddr" value="" placeholder="输入路径..." onkeydown="if(event.key==='Enter')expGo(this.value)">
-        <button onclick="expGo(document.getElementById('expAddr').value)">�?/button>
+        <button onclick="expGo(document.getElementById('expAddr').value)">→</button>
       </div>
       <div class="exp-search">
         <input type="text" id="expSearch" placeholder="搜索..." oninput="expFilter(this.value)">
@@ -512,9 +479,9 @@ body{font-family:'Maple',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans
   <div class="exp-context-item" onclick="ctxOpen()">📂 打开</div>
   <div class="exp-context-item" onclick="ctxDownload()">⬇️ 下载</div>
   <div class="exp-context-divider"></div>
-  <div class="exp-context-item" onclick="ctxNewFolder()">📁 新建文件�?/div>
-  <div class="exp-context-item" onclick="ctxRename()">✏️ 重命�?/div>
-  <div class="exp-context-item" onclick="ctxDelete()" style="color:#ff8a80">🗑�?删除</div>
+  <div class="exp-context-item" onclick="ctxNewFolder()">📁 新建文件夹</div>
+  <div class="exp-context-item" onclick="ctxRename()">✏️ 重命名</div>
+  <div class="exp-context-item" onclick="ctxDelete()" style="color:#ff8a80">🗑️ 删除</div>
 </div>
 
 <!-- Tools -->
@@ -535,38 +502,26 @@ body{font-family:'Maple',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans
   </div>
 </div>
 
-<div class="footer"><span class="ld"></span> <span id="ts">{{TIMESTAMP}}</span> · <span id="uptimeFooter">--</span></div>
+<!-- CC-Web -->
+<div class="tab-content" id="tab-ccweb">
+  <div class="card" style="text-align:center;padding:0;overflow:hidden">
+    <iframe id="ccwebFrame" src="about:blank" style="width:100%;height:75vh;border:none;border-radius:8px;background:#1a1a2e" loading="lazy" allow="clipboard-read;clipboard-write"></iframe>
+  </div>
+</div>
+
+<div class="footer"><span class="ld"></span> <span id="ts">{{TIMESTAMP}}</span></div>
 
 <script>
-const ESC_MAP={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};
-function escHtml(v){return String(v==null?'':v).replace(/[&<>"']/g,ch=>ESC_MAP[ch]);}
-const escAttr=escHtml;
-function joinPath(base,name){return String(base||'').replace(/\\$/,'')+'\\'+name;}
-function driveRoot(letter){return String(letter||'').replace(/[^A-Za-z]/g,'').slice(0,1)+':\\';}
-
 // Tab
-function switchTab(n,targetPath){
-  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['status','files','tools'][i]===n));
+function switchTab(n){
+  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['status','files','tools','ccweb'][i]===n));
   document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
   document.getElementById('tab-'+n).classList.add('active');
-  if(n==='files')expLoad(targetPath);
+  if(n==='ccweb'){var f=document.getElementById('ccwebFrame');if(f.src==='about:blank'||!f.src) f.src='http://'+location.hostname+':8002';}
+  if(n==='files')expLoad();
 }
-function openDisk(path){switchTab('files',path);}
 
-let bootTs=Number('{{BOOT_TS}}')||0;
-function updateUptime(){
-  if(!bootTs)return;
-  const s=Math.max(0,Math.floor(Date.now()/1000-bootTs));
-  const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60),sec=s%60;
-  const str=(d?d+'d ':'')+String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(sec).padStart(2,'0');
-  const el=document.getElementById('uptimeDisplay');
-  const ft=document.getElementById('uptimeFooter');
-  if(el)el.textContent='�?Uptime: '+str;
-  if(ft)ft.textContent=str;
-}
-setInterval(updateUptime,1000);
-updateUptime();
-
+// AJAX refresh
 let rt=null;
 async function sched(){
   clearTimeout(rt);
@@ -578,10 +533,10 @@ async function sched(){
       document.querySelector('#tab-status .row .card:last-child .bnum').innerHTML=d.mem.percent+'<span class="u">%</span>';
       document.querySelector('#tab-status .row .card:last-child .si').textContent=d.mem.used+' / '+d.mem.total+' GB';
       document.getElementById('ts').textContent=d.ts;
-      if(d.boot_ts&&d.boot_ts>0){bootTs=d.boot_ts;updateUptime();}
+      document.querySelector('.hdr .sub:last-child').textContent='Uptime: '+d.uptime;
     }catch(e){}
     sched();
-  },5000);
+  },3000);
 }
 document.addEventListener('visibilitychange',sched);
 sched();
@@ -627,11 +582,10 @@ async function loadDrives(){
     const c=document.getElementById('fileList');
     let h='';
     d.drives.forEach(dr=>{
-      const path=driveRoot(dr.letter);
-      h+='<div class="drive-item" data-path="'+escAttr(path)+'" onclick="openDir(this.dataset.path)">';
+      h+='<div class="drive-item" data-path="'+dr.letter+':\\" onclick="openDir(this.dataset.path)">';
       h+='<span class="drive-icon">&#128190;</span>';
-      h+='<span class="drive-name">'+escHtml(dr.letter)+':\\</span>';
-      h+='<span class="drive-info">'+escHtml(dr.used)+' GB / '+escHtml(dr.free)+' GB free</span>';
+      h+='<span class="drive-name">'+dr.letter+':\\</span>';
+      h+='<span class="drive-info">'+dr.used+' GB / '+dr.free+' GB free</span>';
       h+='</div>';
     });
     c.innerHTML=h;
@@ -665,15 +619,14 @@ async function openDir(path){
     const c=document.getElementById('fileList');
     let h='<div class="fitem" onclick="loadDrives()"><span class="ficon">&#128194;</span><span class="fname" style="color:#69f0ae">Back to Drives</span></div>';
     d.items.forEach(i=>{
-      const fp=joinPath(d.path,i.name);
-      const name=escHtml(i.name),attrName=escAttr(i.name),attrPath=escAttr(fp),mtime=escHtml(i.time);
+      const fp=d.path.replace(/\\$/,'')+'\\'+i.name;
       if(i.dir){
-        h+='<div class="fitem" data-path="'+attrPath+'" data-name="'+attrName+'" onclick="openDir(this.dataset.path)">';
-        h+='<span class="ficon">&#128193;</span><span class="fname">'+name+'</span><span class="fdate">'+mtime+'</span></div>';
+        h+='<div class="fitem" data-path="'+fp+'" data-name="'+i.name+'" onclick="openDir(this.dataset.path)">';
+        h+='<span class="ficon">&#128193;</span><span class="fname">'+i.name+'</span><span class="fdate">'+i.time+'</span></div>';
       }else{
         const sz=i.size>1048576?(i.size/1048576).toFixed(1)+'MB':i.size>1024?(i.size/1024).toFixed(0)+'KB':i.size+'B';
-        h+='<div class="fitem" data-path="'+attrPath+'" data-name="'+attrName+'" ontouchstart="startLongPress(event,this)" ontouchend="cancelLongPress()" ontouchmove="cancelLongPress()" onmousedown="startLongPress(event,this)" onmouseup="cancelLongPress()" onmouseleave="cancelLongPress()">';
-        h+='<span class="ficon">&#128196;</span><span class="fname">'+name+'</span><span class="fsize">'+escHtml(sz)+'</span><span class="fdate">'+mtime+'</span>';
+        h+='<div class="fitem" data-path="'+fp+'" data-name="'+i.name+'" ontouchstart="startLongPress(event,this)" ontouchend="cancelLongPress()" ontouchmove="cancelLongPress()" onmousedown="startLongPress(event,this)" onmouseup="cancelLongPress()" onmouseleave="cancelLongPress()">';
+        h+='<span class="ficon">&#128196;</span><span class="fname">'+i.name+'</span><span class="fsize">'+sz+'</span><span class="fdate">'+i.time+'</span>';
         h+='<span style="font-size:11px;color:#69f0ae;margin-left:8px">长按下载</span></div>';
       }
     });
@@ -682,14 +635,12 @@ async function openDir(path){
 }
 
 // Explorer
-let expHistory=[],expIdx=-1,expCurPath='',expAllItems=[],expLoaded=false,expPendingPath='';
-const fileIcons={'.txt':'📄','.pdf':'📕','.doc':'📘','.docx':'📘','.xls':'📗','.xlsx':'📗','.ppt':'📙','.pptx':'📙','.jpg':'🖼�?,'.jpeg':'🖼�?,'.png':'🖼�?,'.gif':'🖼�?,'.mp3':'🎵','.mp4':'🎬','.zip':'📦','.rar':'📦','.exe':'⚙️','.py':'🐍','.js':'📜','.html':'🌐','.css':'🎨','.json':'📋'};
+let expHistory=[],expIdx=-1,expCurPath='',expAllItems=[],expLoaded=false;
+const fileIcons={'.txt':'📄','.pdf':'📕','.doc':'📘','.docx':'📘','.xls':'📗','.xlsx':'📗','.ppt':'📙','.pptx':'📙','.jpg':'🖼️','.jpeg':'🖼️','.png':'🖼️','.gif':'🖼️','.mp3':'🎵','.mp4':'🎬','.zip':'📦','.rar':'📦','.exe':'⚙️','.py':'🐍','.js':'📜','.html':'🌐','.css':'🎨','.json':'📋'};
 function getIcon(n,isDir){if(isDir)return '📁';const e='.'+n.split('.').pop().toLowerCase();return fileIcons[e]||'📄';}
 function fmtSize(b){if(b>1073741824)return (b/1073741824).toFixed(1)+' GB';if(b>1048576)return (b/1048576).toFixed(1)+' MB';if(b>1024)return (b/1024).toFixed(0)+' KB';return b+' B';}
-async function expLoad(initialPath){
-  if(initialPath)expPendingPath=initialPath;
-  if(expLoaded){if(initialPath)expGo(initialPath);return;}
-  expLoaded=true;
+async function expLoad(){
+  if(expLoaded)return;expLoaded=true;
   document.getElementById('expList').innerHTML='<div style="padding:40px;text-align:center;color:#888"><span class="loading">&#8635;</span> 加载磁盘...</div>';
   try{
     const qa=await(await fetch('/api/drives')).json();
@@ -699,8 +650,7 @@ async function expLoad(initialPath){
       const pct=total>0?Math.round(parseFloat(d.used)/total*100):0;
       const bc=pct<60?'g':pct<85?'y':'r';
       const r=36,circ=2*Math.PI*r,offset=circ-(pct/100)*circ;
-      const path=driveRoot(d.letter);
-      dh+=`<div class="drive-card drive-${bc}" data-path="${escAttr(path)}" onclick="expGo(this.dataset.path)">`;
+      dh+=`<div class="drive-card drive-${bc}" onclick="expGo('${d.letter}:\\')">`;
       dh+='<div class="drive-card-bg" style="height:'+pct+'%"></div>';
       dh+='<div class="drive-card-body">';
       dh+='<div class="drive-ring"><svg width="80" height="80" viewBox="0 0 80 80">';
@@ -708,27 +658,24 @@ async function expLoad(initialPath){
       dh+='<circle class="ring-fg" cx="40" cy="40" r="'+r+'" stroke-dasharray="'+circ+'" stroke-dashoffset="'+offset+'"/>';
       dh+='</svg><div class="drive-ring-pct">'+pct+'%</div></div>';
       dh+='<div class="drive-info">';
-      dh+='<div class="drive-letter">'+escHtml(d.letter)+':</div>';
-      dh+='<div class="drive-label">'+(d.letter==='C'?'系统�?:'数据�?)+'</div>';
+      dh+='<div class="drive-letter">'+d.letter+':</div>';
+      dh+='<div class="drive-label">'+(d.letter==='C'?'系统盘':'数据盘')+'</div>';
       dh+='<div class="drive-bar"><div class="drive-bar-fill" style="width:'+pct+'%"></div></div>';
-      dh+='<div class="drive-detail"><span>已用 <b>'+escHtml(d.used)+' GB</b></span><span>剩余 <b>'+escHtml(d.free)+' GB</b></span></div>';
+      dh+='<div class="drive-detail"><span>已用 <b>'+d.used+' GB</b></span><span>剩余 <b>'+d.free+' GB</b></span></div>';
       dh+='</div></div></div>';
     });
     dh+='</div>';
     let qh='<div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">';
-    qa.drives.forEach(d=>{const path=driveRoot(d.letter);qh+=`<div class="exp-quick-item" data-path="${escAttr(path)}" onclick="expGo(this.dataset.path)">${escHtml(d.letter)}:�?/div>`;});
+    qa.drives.forEach(d=>{qh+=`<div class="exp-quick-item" onclick="expGo('${d.letter}:\\')">${d.letter}:盘</div>`;});
     qh+='</div>';
     document.getElementById('expQuick').innerHTML=dh+qh;
-    const first=qa.drives.length?driveRoot(qa.drives[0].letter):'C:\\';
-    const target=expPendingPath||first;
-    expPendingPath='';
-    expGo(target);
+    expGo('C:\\');
   }catch(e){document.getElementById('expList').innerHTML='<div style="color:#ff8a80;padding:20px">加载失败</div>'}
 }
 async function expGo(path){
   if(!path)return;path=path.replace(/\//g,'\\');
   if(path.length===2&&path[1]===':')path+='\\';
-  document.getElementById('expStatus').textContent='加载�?..';
+  document.getElementById('expStatus').textContent='加载中...';
   try{
     const r=await fetch('/api/files?p='+encodeURIComponent(path));
     const d=await r.json();
@@ -743,18 +690,17 @@ async function expGo(path){
 function expRender(items){
   const c=document.getElementById('expList');let h='',dirs=0,files=0;
   items.forEach(i=>{
-    const fp=joinPath(expCurPath,i.name),name=escHtml(i.name),attrName=escAttr(i.name),attrPath=escAttr(fp),mtime=escHtml(i.time);
-    h+='<div class="exp-item" data-name="'+attrName+'" data-dir="'+i.dir+'" data-path="'+attrPath+'" onclick="expDblClick(this)" oncontextmenu="expCtx(event,this)" ontouchstart="expLongPress(event,this)" ontouchend="expCancelPress()" ontouchmove="expCancelPress()">';
+    h+='<div class="exp-item" data-name="'+i.name+'" data-dir="'+i.dir+'" data-path="'+expCurPath.replace(/\\$/,'')+'\\'+i.name+'" onclick="expDblClick(this)" oncontextmenu="expCtx(event,this)" ontouchstart="expLongPress(event,this)" ontouchend="expCancelPress()" ontouchmove="expCancelPress()">';
     h+='<span class="exp-icon">'+getIcon(i.name,i.dir)+'</span>';
-    h+='<span class="exp-name">'+name+'</span>';
+    h+='<span class="exp-name">'+i.name+'</span>';
     h+='<span class="exp-size">'+(i.dir?'':fmtSize(i.size))+'</span>';
-    h+='<span class="exp-time">'+mtime+'</span></div>';
+    h+='<span class="exp-time">'+i.time+'</span></div>';
     if(i.dir)dirs++;else files++;
   });
   if(!items.length)h='<div style="padding:20px;text-align:center;color:#888">空文件夹</div>';
-  c.innerHTML=h;document.getElementById('expCount').textContent=dirs+' 个文件夹, '+files+' 个文�?;
+  c.innerHTML=h;document.getElementById('expCount').textContent=dirs+' 个文件夹, '+files+' 个文件';
 }
-function expDblClick(el){if(el.dataset.dir==='true')expGo(el.dataset.path);}
+function expDblClick(el){if(el.dataset.dir==='true')expGo(expCurPath.replace(/\\$/,'')+'\\'+el.dataset.name);}
 function expBack(){if(expIdx>0){expIdx--;expGo(expHistory[expIdx])}}
 function expForward(){if(expIdx<expHistory.length-1){expIdx++;expGo(expHistory[expIdx])}}
 function expHome(){expGo('C:\\')}
@@ -767,12 +713,12 @@ function expCtx(e,el){e.preventDefault();ctxItem=el;el.classList.add('selected')
 document.addEventListener('click',()=>{document.getElementById('expContext').style.display='none';document.querySelectorAll('.exp-item.selected').forEach(e=>e.classList.remove('selected'))});
 function ctxOpen(){if(ctxItem)expDblClick(ctxItem)}
 function ctxDownload(){if(!ctxItem||ctxItem.dataset.dir==='true')return;window.open('/api/download?p='+encodeURIComponent(ctxItem.dataset.path));}
-function ctxNewFolder(){const n=prompt('新建文件夹名�?');if(!n)return;fetch('/api/mkdir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:joinPath(expCurPath,n)})}).then(r=>r.json()).then(d=>{if(d.ok)expGo(expCurPath);else alert(d.error)});}
-function ctxRename(){if(!ctxItem)return;const o=ctxItem.dataset.name;const n=prompt('重命�?',o);if(!n||n===o)return;fetch('/api/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({old:ctxItem.dataset.path,new:joinPath(expCurPath,n)})}).then(r=>r.json()).then(d=>{if(d.ok)expGo(expCurPath);else alert(d.error)});}
+function ctxNewFolder(){const n=prompt('新建文件夹名称:');if(!n)return;fetch('/api/mkdir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:expCurPath.replace(/\\$/,'')+'\\'+n})}).then(r=>r.json()).then(d=>{if(d.ok)expGo(expCurPath);else alert(d.error)});}
+function ctxRename(){if(!ctxItem)return;const o=ctxItem.dataset.name;const n=prompt('重命名:',o);if(!n||n===o)return;fetch('/api/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({old:ctxItem.dataset.path,new:expCurPath.replace(/\\$/,'')+'\\'+n})}).then(r=>r.json()).then(d=>{if(d.ok)expGo(expCurPath);else alert(d.error)});}
 function ctxDelete(){if(!ctxItem)return;if(!confirm('确定删除 '+ctxItem.dataset.name+' ?'))return;fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:ctxItem.dataset.path})}).then(r=>r.json()).then(d=>{if(d.ok)expGo(expCurPath);else alert(d.error)});}
 
 // Process Manager
-let allProcs=[],procCtxItem=null,procPressTimer=null,procPressTarget=null,procSortKey='cpu',procSortDir=-1;
+let allProcs=[],procCtxItem=null,procPressTimer=null,procPressTarget=null;
 async function refreshProcs(){
   try{
     const ctrl=new AbortController();
@@ -780,38 +726,21 @@ async function refreshProcs(){
     const resp=await fetch('/api/processes',{signal:ctrl.signal});
     clearTimeout(tid);
     const data=await resp.json();
-    if(data.procs){allProcs=data.procs;renderProcs(currentProcList());}
-  }catch(e){document.getElementById('procCount').textContent='加载超时，点击刷�?;}
-}
-function currentProcList(){
-  const q=document.getElementById('procSearch').value.toLowerCase();
-  const list=(q?allProcs.filter(p=>String(p.name||'').toLowerCase().includes(q)):allProcs).slice();
-  return list.sort((a,b)=>{
-    let av=a[procSortKey],bv=b[procSortKey];
-    if(procSortKey==='name'){av=String(av||'').toLowerCase();bv=String(bv||'').toLowerCase();}
-    else{av=Number(av)||0;bv=Number(bv)||0;}
-    if(av===bv)return 0;
-    return av>bv?procSortDir:-procSortDir;
-  });
+    if(data.procs){allProcs=data.procs;renderProcs(allProcs);}
+  }catch(e){document.getElementById('procCount').textContent='加载超时，点击刷新';}
 }
 function renderProcs(procs){
   const c=document.getElementById('procList');let h='';
   procs.forEach(p=>{
-    const name=String(p.name||'N/A');
-    h+='<div class="pr" data-pid="'+escAttr(p.pid)+'" data-name="'+escAttr(name)+'" oncontextmenu="procCtx(event,this)" ontouchstart="procLongPress(event,this)" ontouchend="procCancelPress()" ontouchmove="procCancelPress()" style="cursor:pointer">';
-    h+='<span class="pn">'+escHtml(name)+'</span>';
+    h+='<div class="pr" data-pid="'+p.pid+'" data-name="'+p.name+'" oncontextmenu="procCtx(event,this)" ontouchstart="procLongPress(event,this)" ontouchend="procCancelPress()" ontouchmove="procCancelPress()" style="cursor:pointer">';
+    h+='<span class="pn">'+p.name+'</span>';
     h+='<span class="pc">'+(p.cpu?p.cpu.toFixed(1)+'s':'-')+'</span>';
-    h+='<span class="pm">'+escHtml(p.mem)+' MB</span>';
-    h+='<span style="width:50px;text-align:right;color:#888">'+escHtml(p.pid)+'</span></div>';
+    h+='<span class="pm">'+p.mem+' MB</span>';
+    h+='<span style="width:50px;text-align:right;color:#888">'+p.pid+'</span></div>';
   });
-  c.innerHTML=h;document.getElementById('procCount').textContent='�?'+procs.length+' 个进�?;
+  c.innerHTML=h;document.getElementById('procCount').textContent='共 '+procs.length+' 个进程';
 }
-function filterProcs(){renderProcs(currentProcList());}
-function sortProcs(key){
-  if(procSortKey===key)procSortDir*=-1;
-  else{procSortKey=key;procSortDir=key==='name'?1:-1;}
-  renderProcs(currentProcList());
-}
+function filterProcs(q){q=q.toLowerCase();renderProcs(q?allProcs.filter(p=>p.name.toLowerCase().includes(q)):allProcs);}
 function procLongPress(e,el){e.preventDefault();procPressTarget=el;procPressTimer=setTimeout(()=>{el.style.background='rgba(105,240,174,.15)';procCtxItem=el;showProcMenu(e.touches?e.touches[0].clientX:0,e.touches?e.touches[0].clientY:0);},500);}
 function procCancelPress(){if(procPressTimer){clearTimeout(procPressTimer);procPressTimer=null;}if(procPressTarget){procPressTarget.style.background='';procPressTarget=null;}}
 function procCtx(e,el){e.preventDefault();procCtxItem=el;el.style.background='rgba(105,240,174,.15)';showProcMenu(e.clientX,e.clientY);}
@@ -841,33 +770,21 @@ def bc(p):
 def render_disks(disks):
     h=""
     for d in disks:
-        pct=max(0,min(100,float(d.get("percent",0) or 0)))
-        c=bc(pct)
-        drive=str(d.get("drive",""))
-        letter=drive.replace(':\\','').replace(':','')
-        path=f"{letter}:\\"
-        h+=(
-            f'<div class="dr" style="cursor:pointer" data-path="{html.escape(path, quote=True)}" onclick="openDisk(this.dataset.path)">'
-            f'<span class="dd">{html.escape(drive, quote=False)}</span>'
-            f'<div class="db"><div class="bw"><div class="bf {c}" style="width:{pct}%"></div></div></div>'
-            f'<div style="min-width:100px;text-align:right"><div class="di">{html.escape(str(d.get("used",0)), quote=False)} / {html.escape(str(d.get("total",0)), quote=False)} GB</div>'
-            f'<div class="df">Free: {html.escape(str(d.get("free",0)), quote=False)} GB</div></div></div>'
-        )
+        c=bc(d["percent"])
+        h+=f'<div class="dr"><span class="dd">{d["drive"]}</span><div class="db"><div class="bw"><div class="bf {c}" style="width:{d["percent"]}%"></div></div></div><div style="min-width:100px;text-align:right"><div class="di">{d["used"]} / {d["total"]} GB</div><div class="df">Free: {d["free"]} GB</div></div></div>'
     return h
 
 def render_procs(procs):
     h=""
     for p in procs:
-        name=html.escape(str(p.get("name","")), quote=False)
-        cpu=float(p.get("cpu") or 0)
-        mem=float(p.get("mem_mb") or 0)
-        h+=f'<div class="pr"><span class="pn">{name}</span><span class="pc">{cpu:.1f}s</span><span class="pm">{mem:.0f} MB</span></div>'
+        h+=f'<div class="pr"><span class="pn">{p["name"]}</span><span class="pc">{p["cpu"]:.1f}s</span><span class="pm">{p["mem_mb"]:.0f} MB</span></div>'
     return h
 
 def build_html(s):
     cpu=s["cpu"]; m=s["mem"]
-    return HTML.replace("{{HOSTNAME}}", html.escape(s["net"]["hostname"], quote=False)) \
-        .replace("{{IP}}", html.escape(s["net"]["ip"], quote=False)) \
+    return HTML.replace("{{HOSTNAME}}", s["net"]["hostname"]) \
+        .replace("{{IP}}", s["net"]["ip"]) \
+        .replace("{{UPTIME}}", "Uptime: "+s["uptime"]) \
         .replace("{{CPU}}", str(cpu)) \
         .replace("{{CPU_C}}", "#69f0ae" if cpu<60 else "#ffeb3b" if cpu<85 else "#ff8a80") \
         .replace("{{CPU_B}}", bc(cpu)) \
@@ -878,9 +795,8 @@ def build_html(s):
         .replace("{{MEM_T}}", str(m["total"])) \
         .replace("{{DISKS}}", render_disks(s["disks"])) \
         .replace("{{PROC}}", str(s["procs"])) \
-        .replace("{{GPU}}", html.escape(s["gpu"], quote=False)) \
+        .replace("{{GPU}}", s["gpu"]) \
         .replace("{{PROCS}}", render_procs(s["top"])) \
-        .replace("{{BOOT_TS}}", str(int(s.get("boot_ts") or 0))) \
         .replace("{{TIMESTAMP}}", s["ts"])
 
 # ─── HTTP ───
@@ -908,7 +824,7 @@ class Handler(BaseHTTPRequestHandler):
         logged_in_ips[ip] = time.time()
 
     def check_auth(self):
-        """检查是否已认证，未认证则返回登录页�?""
+        """检查是否已认证，未认证则返回登录页面"""
         if self.is_logged_in():
             return True
 
@@ -931,7 +847,7 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;displ
 .login-box button:active{transform:scale(.98)}
 .error{color:#ff8a80;font-size:13px;margin-bottom:12px;display:none}
 
-/* 磁盘大卡�?- 醒目可视�?*/
+/* 磁盘大卡片 - 醒目可视化 */
 
 /* 颜色主题 */
 
@@ -942,7 +858,7 @@ body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;displ
 <body>
 <div class="login-box">
   <h1>PC Monitor</h1>
-  <p>请输入密码访�?/p>
+  <p>请输入密码访问</p>
   <div class="error" id="err">密码错误</div>
   <input type="password" id="pwd" placeholder="密码" autofocus>
   <button onclick="login()">登录</button>
@@ -965,17 +881,17 @@ function login(){
         return False
 
     def do_GET(self):
-        # 登录API不需要认�?
+        # 登录API不需要认证
         p = urlparse(self.path)
         path = p.path
         qs = parse_qs(p.query)
 
-        # 登录页面始终可访�?
+        # 登录页面始终可访问
         if path in ("/", "/status"):
             if not self.check_auth():
                 return
 
-        # API也需要认�?
+        # API也需要认证
         if path.startswith("/api/") and path != "/api/login":
             if not self.is_logged_in():
                 self.json_resp({"error": "Unauthorized"}, 401)
@@ -1035,7 +951,7 @@ function login(){
                 self.send_error(404)
             return
         elif path == "/api/processes":
-            # 使用 psutil 快速获取进程列�?
+            # 使用 psutil 快速获取进程列表
             if HAS_PSUTIL:
                 try:
                     procs = []
@@ -1065,7 +981,7 @@ function login(){
     def do_POST(self):
         path = urlparse(self.path).path
         
-        # 登录接口不需要认�?
+        # 登录接口不需要认证
         if path == "/api/login":
             cl = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(cl)
@@ -1081,7 +997,7 @@ function login(){
                 self.json_resp({"ok": False, "error": "请求错误"})
             return
 
-        # 其他POST请求需要认�?
+        # 其他POST请求需要认证
         if not self.is_logged_in():
             self.json_resp({"error": "Unauthorized"}, 401)
             return
@@ -1146,7 +1062,7 @@ function login(){
                 os.kill(pid, signal.SIGTERM)
                 self.json_resp({"ok": True})
             except ProcessLookupError:
-                self.json_resp({"ok": False, "error": "进程不存�?})
+                self.json_resp({"ok": False, "error": "进程不存在"})
             except PermissionError:
                 self.json_resp({"ok": False, "error": "权限不足"})
             except Exception as e:
@@ -1196,17 +1112,15 @@ CCWEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..',
 CCWEB_PORT = 8002
 
 def start_ccweb():
-    """启动 CC-Web Node.js 服务器"""
     if not os.path.isdir(CCWEB_DIR):
-        print(f"  [CC-Web] 目录不存在: {CCWEB_DIR}")
+        print(f"  [CC-Web] dir not found: {CCWEB_DIR}")
         return None
-    # 检查端口是否已被占用
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(1)
         s.connect(('127.0.0.1', CCWEB_PORT))
         s.close()
-        print(f"  CC-Web 已在运行: http://localhost:{CCWEB_PORT}")
+        print(f"  CC-Web already running: http://localhost:{CCWEB_PORT}")
         return None
     except:
         pass
@@ -1216,12 +1130,12 @@ def start_ccweb():
             cwd=CCWEB_DIR,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            creationflags=0x00000008 | 0x00000200
         )
-        print(f"  CC-Web 启动中 (PID {proc.pid}): http://localhost:{CCWEB_PORT}")
+        print(f"  CC-Web starting (PID {proc.pid}): http://localhost:{CCWEB_PORT}")
         return proc
     except Exception as e:
-        print(f"  [CC-Web] 启动失败: {e}")
+        print(f"  [CC-Web] failed: {e}")
         return None
 
 def main():
