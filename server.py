@@ -817,7 +817,14 @@ async function takeSS(){
     const r=await fetch('/api/screenshot');
     const d=await r.json();
     if(d.ok){
+      // Flash effect
+      const f=document.createElement('div');f.className='ss-flash';
+      document.body.appendChild(f);
+      setTimeout(()=>f.remove(),500);
       document.getElementById('ssImg').src='data:image/jpeg;base64,'+d.image;
+      document.getElementById('ssImg').style.animation='none';
+      void document.getElementById('ssImg').offsetWidth;
+      document.getElementById('ssImg').style.animation='captureSlideIn .4s ease';
       document.getElementById('ssCard').style.display='block';
     }else alert('Failed');
   }catch(e){alert('Error: '+e.message)}
@@ -977,8 +984,8 @@ function expFilter(q){q=q.toLowerCase();expRender(q?expAllItems.filter(i=>i.name
 let ctxItem=null,expPressTimer=null,expPressTarget=null;
 function expLongPress(e,el){expPressTarget=el;el.style.background='rgba(105,240,174,.08)';expPressTimer=setTimeout(()=>{el.style.background='rgba(105,240,174,.15)';if(el.dataset.dir!=='true'&&confirm('下载 '+el.dataset.name+' ?')){window.open('/api/download?p='+encodeURIComponent(el.dataset.path));}el.style.background='';expPressTarget=null;},600);}
 function expCancelPress(){if(expPressTimer){clearTimeout(expPressTimer);expPressTimer=null;}if(expPressTarget){expPressTarget.style.background='';expPressTarget=null;}}
-function expCtx(e,el){e.preventDefault();ctxItem=el;el.classList.add('selected');const m=document.getElementById('expContext');m.style.display='block';m.style.left=Math.min(e.clientX,window.innerWidth-180)+'px';m.style.top=Math.min(e.clientY,window.innerHeight-200)+'px';}
-document.addEventListener('click',()=>{document.getElementById('expContext').style.display='none';document.querySelectorAll('.exp-item.selected').forEach(e=>e.classList.remove('selected'))});
+function expCtx(e,el){e.preventDefault();ctxItem=el;el.classList.add('selected');const m=document.getElementById('expContext');m.classList.add('visible');m.style.left=Math.min(e.clientX,window.innerWidth-180)+'px';m.style.top=Math.min(e.clientY,window.innerHeight-200)+'px';}
+document.addEventListener('click',()=>{document.getElementById('expContext').classList.remove('visible');document.querySelectorAll('.exp-item.selected').forEach(e=>e.classList.remove('selected'))});
 function ctxOpen(){if(ctxItem)expDblClick(ctxItem)}
 function ctxDownload(){if(!ctxItem||ctxItem.dataset.dir==='true')return;window.open('/api/download?p='+encodeURIComponent(ctxItem.dataset.path));}
 function ctxNewFolder(){const n=prompt('新建文件夹名称:');if(!n)return;fetch('/api/mkdir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:expCurPath.replace(/\\$/,'')+'\\'+n})}).then(r=>r.json()).then(d=>{if(d.ok)expGo(expCurPath);else alert(d.error)});}
@@ -1012,8 +1019,8 @@ function filterProcs(q){q=q.toLowerCase();renderProcs(q?allProcs.filter(p=>p.nam
 function procLongPress(e,el){e.preventDefault();procPressTarget=el;procPressTimer=setTimeout(()=>{el.style.background='rgba(105,240,174,.15)';procCtxItem=el;showProcMenu(e.touches?e.touches[0].clientX:0,e.touches?e.touches[0].clientY:0);},500);}
 function procCancelPress(){if(procPressTimer){clearTimeout(procPressTimer);procPressTimer=null;}if(procPressTarget){procPressTarget.style.background='';procPressTarget=null;}}
 function procCtx(e,el){e.preventDefault();procCtxItem=el;el.style.background='rgba(105,240,174,.15)';showProcMenu(e.clientX,e.clientY);}
-function showProcMenu(x,y){const m=document.getElementById('procContext');m.style.display='block';m.style.left=Math.min(x,window.innerWidth-180)+'px';m.style.top=Math.min(y,window.innerHeight-100)+'px';}
-document.addEventListener('click',()=>{document.getElementById('procContext').style.display='none';document.querySelectorAll('.pr[style*="background"]').forEach(e=>e.style.background='');});
+function showProcMenu(x,y){const m=document.getElementById('procContext');m.classList.add('visible');m.style.left=Math.min(x,window.innerWidth-180)+'px';m.style.top=Math.min(y,window.innerHeight-100)+'px';}
+document.addEventListener('click',()=>{document.getElementById('procContext').classList.remove('visible');document.querySelectorAll('.pr[style*="background"]').forEach(e=>e.style.background='');});
 async function procKill(){
   if(!procCtxItem)return;const pid=procCtxItem.dataset.pid,name=procCtxItem.dataset.name;
   if(!confirm('确定结束 '+name+' (PID:'+pid+')?'))return;
@@ -1184,22 +1191,22 @@ class Handler(BaseHTTPRequestHandler):
 <title>Login</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;display:flex;justify-content:center;align-items:center;min-height:100vh}
-.login-box{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:32px;width:320px;text-align:center}
-.login-box h1{font-size:24px;margin-bottom:8px}
-.login-box p{font-size:13px;color:#888;margin-bottom:24px}
-.login-box input{width:100%;padding:12px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:8px;color:#fff;font-size:16px;outline:none;margin-bottom:16px}
-.login-box input:focus{border-color:#69f0ae}
-.login-box button{width:100%;padding:12px;background:linear-gradient(135deg,#667eea,#764ba2);border:none;border-radius:8px;color:#fff;font-size:16px;font-weight:600;cursor:pointer}
-.login-box button:active{transform:scale(.98)}
-.error{color:#ff8a80;font-size:13px;margin-bottom:12px;display:none}
-
-/* 磁盘大卡片 - 醒目可视化 */
-
-/* 颜色主题 */
-
-
-
+body{font-family:-apple-system,sans-serif;background:#0a0a1a;color:#e0e0e0;display:flex;justify-content:center;align-items:center;min-height:100vh;overflow:hidden}
+body::before{content:'';position:fixed;inset:-50%;width:200%;height:200%;background:radial-gradient(circle at 30% 40%,rgba(102,126,234,.15),transparent 50%),radial-gradient(circle at 70% 60%,rgba(118,75,162,.12),transparent 50%),radial-gradient(circle at 50% 20%,rgba(105,240,174,.08),transparent 40%);animation:meshMove 20s ease-in-out infinite;z-index:-2}
+body::after{content:'';position:fixed;inset:0;box-shadow:120px 80px 0 .5px rgba(105,240,174,.3),350px 150px 0 .5px rgba(102,126,234,.25),600px 50px 0 .5px rgba(118,75,162,.2),200px 300px 0 .5px rgba(105,240,174,.15),500px 350px 0 .5px rgba(102,126,234,.2),80px 400px 0 .5px rgba(118,75,162,.15),700px 200px 0 .5px rgba(105,240,174,.2),400px 450px 0 .5px rgba(102,126,234,.15),300px 100px 0 .5px rgba(255,255,255,.1);animation:floatParticles 30s linear infinite;z-index:-1;pointer-events:none}
+@keyframes meshMove{0%,100%{transform:translate(0,0)}25%{transform:translate(3%,-2%)}50%{transform:translate(-2%,3%)}75%{transform:translate(2%,1%)}}
+@keyframes floatParticles{0%{transform:translateY(0)}100%{transform:translateY(-50px)}}
+@keyframes loginBoxIn{0%{opacity:0;transform:translateY(30px) scale(.95)}100%{opacity:1;transform:translateY(0) scale(1)}}
+@keyframes loginGlow{0%,100%{box-shadow:0 0 20px rgba(102,126,234,.2),0 0 40px rgba(118,75,162,.1)}50%{box-shadow:0 0 30px rgba(102,126,234,.3),0 0 60px rgba(118,75,162,.2)}}
+.login-box{background:rgba(255,255,255,.03);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:40px 32px;width:340px;text-align:center;animation:loginBoxIn .6s ease both;box-shadow:0 8px 32px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.05)}
+.login-box h1{font-size:28px;margin-bottom:6px;background:linear-gradient(135deg,#69f0ae,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;font-weight:700}
+.login-box p{font-size:13px;color:#888;margin-bottom:28px}
+.login-box input{width:100%;padding:14px 16px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:12px;color:#fff;font-size:16px;outline:none;margin-bottom:20px;transition:border-color .3s,box-shadow .3s}
+.login-box input:focus{border-color:rgba(105,240,174,.5);box-shadow:0 0 0 3px rgba(105,240,174,.15),0 0 20px rgba(105,240,174,.1)}
+.login-box input::placeholder{color:#555}
+.login-box button{width:100%;padding:14px;background:linear-gradient(135deg,#667eea,#764ba2);border:none;border-radius:12px;color:#fff;font-size:16px;font-weight:600;cursor:pointer;transition:transform .2s,box-shadow .3s;animation:loginGlow 3s ease-in-out infinite}
+.login-box button:active{transform:scale(.96)}
+.error{color:#ff8a80;font-size:13px;margin-bottom:14px;display:none;animation:loginBoxIn .3s ease}
 </style>
 </head>
 <body>
@@ -1217,10 +1224,9 @@ function login(){
   fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:pwd})})
   .then(r=>r.json()).then(d=>{
     if(d.ok)location.reload();
-    else{document.getElementById("err").style.display="block";document.getElementById("pwd").value="";document.getElementById("pwd").focus()}
-  }).catch(()=>{document.getElementById("err").textContent="网络错误";document.getElementById("err").style.display="block"})
+    else{var e=document.getElementById("err");e.style.display="block";e.textContent="密码错误";document.getElementById("pwd").value="";document.getElementById("pwd").focus()}
+  }).catch(()=>{var e=document.getElementById("err");e.style.display="block";e.textContent="网络错误"})
 }
-
 </script>
 </body>
 </html>'''
