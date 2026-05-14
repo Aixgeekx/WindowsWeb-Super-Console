@@ -201,48 +201,109 @@ extern "C" __declspec(dllexport) int __cdecl get_system_info(char* buf, int bufS
     return 0;
 }
 
-// Screenshot via GDI+ (much faster than PowerShell)
-// Returns base64 encoded JPEG in buf, 0 on success
+// Screenshot via GDI+ — returns base64 JPEG, 0=success
 extern "C" __declspec(dllexport) int take_screenshot(char* buf, int bufSize) {
-    // Set DPI awareness
     typedef BOOL (WINAPI *SetProcessDPIAware_t)();
-    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
-    if (hUser32) {
-        SetProcessDPIAware_t pfn = (SetProcessDPIAware_t)GetProcAddress(hUser32, "SetProcessDPIAware");
-        if (pfn) pfn();
-    }
+    HMODULE hU32 = GetModuleHandleW(L"user32.dll");
+    if (hU32) { auto p = (SetProcessDPIAware_t)GetProcAddress(hU32, "SetProcessDPIAware"); if (p) p(); }
 
-    // Get screen dimensions
-    int x = GetSystemMetrics(76); // SM_XVIRTUALSCREEN
-    int y = GetSystemMetrics(77); // SM_YVIRTUALSCREEN
-    int w = GetSystemMetrics(78); // SM_CXVIRTUALSCREEN
-    int h = GetSystemMetrics(79); // SM_CYVIRTUALSCREEN
-    if (w <= 0 || h <= 0) {
-        w = GetSystemMetrics(0); // SM_CXSCREEN
-        h = GetSystemMetrics(1); // SM_CYSCREEN
-        x = 0; y = 0;
-    }
+    int x = GetSystemMetrics(76), y = GetSystemMetrics(77);
+    int w = GetSystemMetrics(78), h = GetSystemMetrics(79);
+    if (w <= 0 || h <= 0) { w = GetSystemMetrics(0); h = GetSystemMetrics(1); x = y = 0; }
 
-    // Create device contexts
     HDC hScreen = GetDC(NULL);
     HDC hMem = CreateCompatibleDC(hScreen);
-    HBITMAP hBitmap = CreateCompatibleBitmap(hScreen, w, h);
-    HBITMAP hOld = (HBITMAP)SelectObject(hMem, hBitmap);
-
-    // Copy screen to bitmap
+    HBITMAP hBmp = CreateCompatibleBitmap(hScreen, w, h);
+    HBITMAP hOld = (HBITMAP)SelectObject(hMem, hBmp);
     BitBlt(hMem, 0, 0, w, h, hScreen, x, y, SRCCOPY);
-
-    // Convert to JPEG using GDI+
-    // For simplicity, we'll save as BMP and encode manually
-    // In production, use GDI+ properly
-
-    // For now, return a placeholder - the Python fallback will handle it
     SelectObject(hMem, hOld);
-    DeleteObject(hBitmap);
-    DeleteDC(hMem);
-    ReleaseDC(NULL, hScreen);
 
-    // Fallback: return empty to trigger PowerShell fallback
-    if (bufSize > 0) buf[0] = 0;
-    return -1;
+    // Init GDI+
+    typedef int (WINAPI *GdiplusStartup_t)(ULONG_PTR*, void*, void*);
+    typedef void (WINAPI *GdiplusShutdown_t)(ULONG_PTR);
+    typedef int (WINAPI *GdipCreateBitmapFromHBITMAP_t)(HBITMAP, HPALETTE, void**);
+    typedef int (WINAPI *GdipGetImageEncodersSize_t)(UINT*, UINT*);
+    typedef int (WINAPI *GdipGetImageEncoders_t)(UINT, UINT, void*);
+    typedef int (WINAPI *GdipSaveImageToStream_t)(void*, void*, const wchar_t*, void*);
+    typedef int (WINAPI *GdipCreateStreamOnMemory_t)(BYTE*, int, void**);
+    typedef int (WINAPI *GdipDisposeImage_t)(void*);
+    typedef int (WINAPI *GdipCreateHBITMAPFromBitmap_t)(void*, HBITMAP*, unsigned int);
+
+    HMODULE hGdip = LoadLibraryW(L"gdiplus.dll");
+    if (!hGdip) { DeleteObject(hBmp); DeleteDC(hMem); ReleaseDC(NULL, hScreen); buf[0] = 0; return -1; }
+
+    auto pStartup = (GdiplusStartup_t)GetProcAddress(hGdip, "GdiplusStartup");
+    auto pShutdown = (GdiplusShutdown_t)GetProcAddress(hGdip, "GdiplusShutdown");
+    auto pCreateBmp = (GdipCreateBitmapFromHBITMAP_t)GetProcAddress(hGdip, "GdipCreateBitmapFromHBITMAP");
+    auto pEncSize = (GdipGetImageEncodersSize_t)GetProcAddress(hGdip, "GdipGetImageEncodersSize");
+    auto pEncoders = (GdipGetImageEncoders_t)GetProcAddress(hGdip, "GdipGetImageEncoders");
+    auto pSave = (GdipSaveImageToStream_t)GetProcAddress(hGdip, "GdipSaveImageToStream");
+    auto pCreateStream = (GdipCreateStreamOnMemory_t)GetProcAddress(hGdip, "GdipCreateStreamOnMemory");
+    auto pDispose = (GdipDisposeImage_t)GetProcAddress(hGdip, "GdipDisposeImage");
+
+    ULONG_PTR gdiplusToken;
+    char startupBuf[24] = {0};
+    pStartup(&gdiplusToken, startupBuf, NULL);
+
+    void* pGdipBmp = NULL;
+    pCreateBmp(hBmp, NULL, &pGdipBmp);
+
+    // Find JPEG encoder
+    UINT num = 0, size = 0;
+    pEncSize(&num, &size);
+    void* encoders = malloc(size);
+    pEncoders(num, size, encoders);
+    CLSID jpegClsid = {0};
+    for (UINT i = 0; i < num; i++) {
+        wchar_t* mime = (wchar_t*)((BYTE*)encoders + i * (76 + 48*2) + 48);
+        if (wcsstr(mime, L"image/jpeg")) {
+            memcpy(&jpegClsid, (BYTE*)encoders + i * (76 + 48*2), 16);
+            break;
+        }
+    }
+    free(encoders);
+
+    // Save to IStream in memory
+    void* pStream = NULL;
+    pCreateStream(NULL, 0, &pStream);
+    int quality = 60;
+    // Encoder parameter: quality
+    struct { GUID Guid; ULONG NumberOfValues; ULONG Type; void* Value; } param;
+    GUID qualityParam = {0x1d5be4b5, 0xfa4a, 0x452d, {0x9c,0xdd,0x5a,0x38,0x29,0x41,0x93,0x25}};
+    param.Guid = qualityParam; param.NumberOfValues = 1; param.Type = 1; param.Value = &quality;
+    pSave(pGdipBmp, pStream, L"image/jpeg", &param);
+
+    // Read from IStream
+    STATSTG stat;
+    pStream->lpVtbl->Stat(pStream, &stat, 1);
+    ULONG len = (ULONG)stat.cbSize.QuadPart;
+    if (len > 0 && len < (ULONG)(bufSize - 8)) {
+        IStream* pSeek = pStream;
+        LARGE_INTEGER zero = {0};
+        pSeek->lpVtbl->Seek(pSeek, zero, STREAM_SEEK_SET, NULL);
+        ULONG read = 0;
+        pSeek->lpVtbl->Read(pSeek, (void*)buf, len, &read);
+        // Base64 encode
+        const char* tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        int o = 0;
+        for (ULONG i = 0; i < len; i += 3) {
+            unsigned int n = ((unsigned char)buf[i]) << 16;
+            if (i + 1 < len) n |= ((unsigned char)buf[i+1]) << 8;
+            if (i + 2 < len) n |= ((unsigned char)buf[i+2]);
+            buf[o++] = tbl[(n >> 18) & 63];
+            buf[o++] = tbl[(n >> 12) & 63];
+            buf[o++] = (i + 1 < len) ? tbl[(n >> 6) & 63] : '=';
+            buf[o++] = (i + 2 < len) ? tbl[n & 63] : '=';
+        }
+        buf[o] = 0;
+    } else {
+        buf[0] = 0; len = 0;
+    }
+
+    pStream->lpVtbl->Release(pStream);
+    pDispose(pGdipBmp);
+    pShutdown(gdiplusToken);
+    FreeLibrary(hGdip);
+    DeleteObject(hBmp); DeleteDC(hMem); ReleaseDC(NULL, hScreen);
+    return (len > 0) ? 0 : -1;
 }
