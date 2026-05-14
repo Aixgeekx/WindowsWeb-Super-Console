@@ -47,6 +47,8 @@ try:
         _sysinfo_dll = ctypes.CDLL(_dll_path)
         _sysinfo_dll.get_system_info.argtypes = [ctypes.c_char_p, ctypes.c_int]
         _sysinfo_dll.get_system_info.restype = ctypes.c_int
+        _sysinfo_dll.take_screenshot.argtypes = [ctypes.c_char_p, ctypes.c_int]
+        _sysinfo_dll.take_screenshot.restype = ctypes.c_int
         _sysinfo_buf = ctypes.create_string_buffer(8192)
 except Exception:
     _sysinfo_dll = None
@@ -691,6 +693,14 @@ def take_screenshot():
     [Convert]::ToBase64String($ms.ToArray())
     $g.Dispose(); $bmp.Dispose(); $ms.Dispose()
     '''
+    # Try native DLL first
+    if _sysinfo_dll:
+        try:
+            buf = ctypes.create_string_buffer(1024 * 1024)  # 1MB buffer
+            if _sysinfo_dll.take_screenshot(buf, len(buf)) == 0 and buf.value:
+                return buf.value.decode("utf-8")
+        except: pass
+    # Fallback to PowerShell
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-Command", ps_script], capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace")
         if r.returncode == 0 and r.stdout.strip():
@@ -1923,17 +1933,24 @@ function login(){
             pth = unquote(raw).replace("/", "\\")
             if os.path.isfile(pth):
                 try:
-                    with open(pth, "rb") as f:
-                        data = f.read()
                     import mimetypes
                     mime = mimetypes.guess_type(pth)[0] or "application/octet-stream"
                     filename = os.path.basename(pth)
+                    file_size = os.path.getsize(pth)
                     self.send_response(200)
                     self.send_header("Content-Type", mime)
                     self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
-                    self.send_header("Content-Length", len(data))
+                    self.send_header("Content-Length", file_size)
                     self.end_headers()
-                    self.wfile.write(data)
+                    # Stream file in chunks for large files
+                    CHUNK_SIZE = 64 * 1024  # 64KB chunks
+                    with open(pth, "rb") as f:
+                        while True:
+                            chunk = f.read(CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
                 except Exception as e:
                     self.send_error(500, str(e))
             else:
