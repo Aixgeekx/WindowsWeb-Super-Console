@@ -64,6 +64,20 @@ python server.py 8080
 
 双击 `autostart.vbs` 会将启动脚本添加到 Windows 启动文件夹，每次登录自动运行。
 
+### 保活计划任务
+
+推荐使用计划任务保活，程序退出后会自动重启：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install_keepalive.ps1 -Port 9999
+```
+
+卸载保活任务：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\uninstall_keepalive.ps1
+```
+
 ### 手动设置
 
 ```powershell
@@ -99,6 +113,21 @@ PowerShell 终端禁止执行以下危险命令：
 - Python 3（标准库，无需安装第三方包）
 - PowerShell（系统信息采集）
 - 纯 HTML/CSS/JS（前端）
+
+## EXE 构建与发布
+
+本地构建：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_exe.ps1
+```
+
+版本号写在 `VERSION`。推送 `v版本号` tag 后，GitHub Actions 会自动构建并发布 exe：
+
+```bash
+git tag v1.9.0
+git push origin v1.9.0
+```
 
 ## 截图
 
