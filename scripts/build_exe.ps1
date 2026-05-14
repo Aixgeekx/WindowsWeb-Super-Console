@@ -9,6 +9,10 @@ $version = if (Test-Path $versionPath) { (Get-Content $versionPath -Raw).Trim() 
 
 Set-Location $repo
 python -m pip install --upgrade pip pyinstaller
-pyinstaller --noconfirm --clean --onefile --name "$Name-v$version" server.py
+$dllFlag = ""
+if (Test-Path (Join-Path $repo "sysinfo.dll")) {
+    $dllFlag = "--add-data `"sysinfo.dll;.`""
+}
+pyinstaller --noconfirm --clean --onefile $dllFlag --name "$Name-v$version" server.py
 
 Write-Host "Built: $(Join-Path $repo "dist\$Name-v$version.exe")"

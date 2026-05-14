@@ -13,9 +13,15 @@ import json
 import mimetypes
 import shutil
 import uuid
+import threading
+import base64
+import struct
+import ctypes
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote, quote
 import sys
+import threading
+import ctypes
 try:
     import psutil
     HAS_PSUTIL = True
@@ -28,20 +34,62 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CC_SESSIONS_DIR = os.path.join(BASE_DIR, "ccweb_sessions")
 CC_AGENT_TIMEOUT = 180
 
+def resource_path(relative):
+    if hasattr(sys, '_MEIPASS'): return os.path.join(sys._MEIPASS, relative)
+    return os.path.join(BASE_DIR, relative)
+
+# ─── C++ DLL 加速 ───
+_sysinfo_dll = None
+_sysinfo_buf = None
+try:
+    _dll_path = resource_path("sysinfo.dll")
+    if os.path.exists(_dll_path):
+        _sysinfo_dll = ctypes.CDLL(_dll_path)
+        _sysinfo_dll.get_system_info.argtypes = [ctypes.c_char_p, ctypes.c_int]
+        _sysinfo_dll.get_system_info.restype = ctypes.c_int
+        _sysinfo_buf = ctypes.create_string_buffer(8192)
+except Exception:
+    _sysinfo_dll = None
+
 # ─── 系统信息采集 ───
 
-def run_ps(cmd):
+def run_ps(cmd, timeout=15):
     try:
         r = subprocess.run(
             ["powershell", "-NoProfile", "-Command", cmd],
-            capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace"
+            capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace"
         )
         return r.stdout.strip()
     except Exception as e:
         return f"Error: {e}"
 
-def get_all_system_info():
-    """一次 PowerShell 获取全部系统信息，避免多次启动进程"""
+def _get_info_psutil():
+    """psutil fast fallback (<50ms)"""
+    cpu = psutil.cpu_percent(interval=0.3)
+    vm = psutil.virtual_memory()
+    uptime_s = time.time() - psutil.boot_time()
+    uptime_h = int(uptime_s // 3600)
+    uptime_d = int(uptime_h // 24)
+    disks = []
+    for part in psutil.disk_partitions(all=False):
+        try:
+            u = psutil.disk_usage(part.mountpoint)
+            disks.append({"drive":part.device.rstrip("\\"),"used":round(u.used/1073741824,1),"total":round(u.total/1073741824,1),"free":round(u.free/1073741824,1),"percent":round(u.percent,1)})
+        except: continue
+    procs = len(psutil.pids())
+    top = []
+    for p in psutil.process_iter(['name','cpu_times','memory_info']):
+        try:
+            i = p.info
+            ct = sum(i['cpu_times'][:2]) if i['cpu_times'] else 0
+            mb = round(i['memory_info'].rss/1048576) if i['memory_info'] else 0
+            top.append({"name":i['name'],"cpu":round(ct,1),"mem_mb":mb})
+        except: continue
+    top.sort(key=lambda x:x['cpu'],reverse=True)
+    return {"cpu":cpu,"mem":{"used":round(vm.used/1073741824,2),"total":round(vm.total/1073741824,2),"free":round(vm.available/1073741824,2),"percent":round(vm.percent,1)},"disks":disks,"uptime":f"{uptime_d}d {uptime_h%24}h","procs":procs,"top":top[:8],"gpu":_gpu_name_cache}
+
+def _get_info_powershell():
+    """PowerShell fallback (slow, ~1-4s)"""
     out = run_ps('''
         $cpu = [math]::Round((Get-Counter "\\Processor(_Total)\\% Processor Time").CounterSamples.CookedValue, 1)
         $os = Get-CimInstance Win32_OperatingSystem
@@ -98,21 +146,24 @@ def get_all_system_info():
             except: pass
     return info
 
-def get_uptime():
-    out = run_ps("""
-        $boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
-        $span = (Get-Date) - $boot
-        $d = [int]$span.TotalDays
-        $h = $span.Hours
-        $m = $span.Minutes
-        "${d}d ${h}h ${m}m"
-    """)
-    return out if out else "N/A"
+def get_all_system_info():
+    """DLL → psutil → PowerShell 三级降级"""
+    if _sysinfo_dll and _sysinfo_buf:
+        try:
+            if _sysinfo_dll.get_system_info(_sysinfo_buf, 8192) == 0:
+                return json.loads(_sysinfo_buf.value.decode("utf-8"))
+        except: pass
+    if HAS_PSUTIL:
+        try: return _get_info_psutil()
+        except: pass
+    return _get_info_powershell()
 
-def get_process_count():
-    out = run_ps("(Get-Process).Count")
-    try: return int(out)
-    except: return 0
+_gpu_name_cache = "N/A"
+
+def _init_gpu_name():
+    global _gpu_name_cache
+    try: _gpu_name_cache = get_gpu_info()
+    except: pass
 
 def get_network_info():
     hostname = socket.gethostname()
@@ -125,25 +176,352 @@ def get_network_info():
         ip = "127.0.0.1"
     return {"hostname": hostname, "ip": ip}
 
-def get_top_processes(n=8):
-    ps = (
-        'Get-Process | Sort-Object CPU -Descending | Select-Object -First %d Name, CPU, WorkingSet64 |'
-        ' ForEach-Object {'
-        ' $mem = [math]::Round($_.WorkingSet64/1MB, 1);'
-        ' "$($_.Name)|$([math]::Round($_.CPU,1))|$mem" }'
-    ) % n
-    out = run_ps(ps)
+def get_gpu_info():
+    return run_ps("(Get-CimInstance Win32_VideoController | Where-Object Name -notmatch 'Oray|Remote|Virtual|Display|Basic' | Select-Object -First 1).Name", timeout=4) or "N/A"
+
+def fmt_uptime(seconds):
+    seconds = max(0, int(seconds))
+    days = seconds // 86400
+    hours = (seconds % 86400) // 3600
+    mins = (seconds % 3600) // 60
+    return f"{days}d {hours}h {mins}m"
+
+def get_network_info_cached():
+    now = time.time()
+    if net_cache["value"] and now - net_cache["time"] < NET_CACHE_TTL:
+        return net_cache["value"]
+    net = get_network_info()
+    net_cache["value"] = net
+    net_cache["time"] = now
+    return net
+
+def get_disk_info_fast():
+    disks = []
+    if hasattr(os, "listdrives"):
+        drive_paths = os.listdrives()
+    elif HAS_PSUTIL:
+        drive_paths = [p.mountpoint for p in psutil.disk_partitions(all=False)]
+    else:
+        drive_paths = []
+    for drive_path in drive_paths:
+        try:
+            usage = shutil.disk_usage(drive_path)
+        except:
+            continue
+        total = usage.total / 1073741824
+        used = usage.used / 1073741824
+        free = usage.free / 1073741824
+        percent = (used / total * 100) if total else 0
+        if len(drive_path) >= 2 and drive_path[1] == ":":
+            drive = drive_path[:2].upper()
+        else:
+            drive = drive_path.rstrip("\\/")
+        disks.append({
+            "drive": drive,
+            "used": round(used, 1),
+            "total": round(total, 1),
+            "free": round(free, 1),
+            "percent": round(percent, 1),
+        })
+    return disks
+
+def get_processes_fast():
+    if not HAS_PSUTIL:
+        return []
+    now = time.time()
+    if process_cache["value"] and now - process_cache["time"] < PROCESS_CACHE_TTL:
+        return process_cache["value"]
     procs = []
-    for line in out.split("\n"):
-        line = line.strip()
-        if "|" in line:
-            parts = line.split("|")
-            if len(parts) == 3:
-                procs.append({"name": parts[0], "cpu": float(parts[1]) if parts[1] else 0, "mem_mb": float(parts[2]) if parts[2] else 0})
+    for p in psutil.process_iter(["pid", "name", "cpu_times", "memory_info"]):
+        try:
+            info = p.info
+            cpu_times = info.get("cpu_times")
+            mem_info = info.get("memory_info")
+            cpu = sum(cpu_times[:2]) if cpu_times else 0
+            mem = round(mem_info.rss / 1048576) if mem_info else 0
+            procs.append({
+                "pid": info.get("pid", 0),
+                "name": info.get("name") or "N/A",
+                "cpu": round(cpu, 1),
+                "mem": mem,
+            })
+        except:
+            continue
+    procs.sort(key=lambda x: x["cpu"], reverse=True)
+    process_cache["value"] = procs
+    process_cache["time"] = now
     return procs
 
-def get_gpu_info():
-    return run_ps("(Get-CimInstance Win32_VideoController | Where-Object Name -notmatch 'Oray|Remote|Virtual|Display|Basic' | Select-Object -First 1).Name") or "N/A"
+def get_all_system_info_fast():
+    # C++ DLL 最快路径
+    if _sysinfo_dll and _sysinfo_buf:
+        try:
+            if _sysinfo_dll.get_system_info(_sysinfo_buf, 8192) == 0:
+                return json.loads(_sysinfo_buf.value.decode("utf-8"))
+        except: pass
+    if not HAS_PSUTIL:
+        return get_all_system_info()
+    cpu = round(psutil.cpu_percent(interval=None), 1)
+    mem = psutil.virtual_memory()
+    proc_count = len(psutil.pids())
+    return {
+        "cpu": cpu,
+        "mem": {
+            "used": round(mem.used / 1073741824, 2),
+            "total": round(mem.total / 1073741824, 2),
+            "free": round(mem.available / 1073741824, 2),
+            "percent": round(mem.percent, 1),
+        },
+        "disks": get_disk_info_fast(),
+        "uptime": fmt_uptime(time.time() - psutil.boot_time()),
+        "procs": proc_count,
+        "top": [],
+    }
+
+def _refresh_gpu_cache():
+    try:
+        value = get_gpu_info()
+        if not value or value.startswith("Error:"):
+            value = "N/A"
+        with gpu_lock:
+            gpu_cache["value"] = value
+            gpu_cache["time"] = time.time()
+            gpu_cache["loading"] = False
+    except:
+        with gpu_lock:
+            gpu_cache["value"] = "N/A"
+            gpu_cache["time"] = time.time()
+            gpu_cache["loading"] = False
+
+def get_gpu_info_cached():
+    now = time.time()
+    with gpu_lock:
+        if gpu_cache["value"] and now - gpu_cache["time"] < GPU_CACHE_TTL:
+            return gpu_cache["value"]
+        if not gpu_cache["loading"]:
+            gpu_cache["loading"] = True
+            threading.Thread(target=_refresh_gpu_cache, daemon=True).start()
+        return gpu_cache["value"] or "检测中"
+
+# ─── 桌面 PowerShell 窗口映射 ───
+
+def _win_api_ready():
+    return os.name == "nt"
+
+def _get_window_text(hwnd):
+    if not _win_api_ready():
+        return ""
+    import ctypes.wintypes as wt
+    user32 = ctypes.windll.user32
+    length = user32.GetWindowTextLengthW(hwnd)
+    if length <= 0:
+        return ""
+    buf = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(hwnd, buf, length + 1)
+    return buf.value
+
+def _get_class_name(hwnd):
+    if not _win_api_ready():
+        return ""
+    user32 = ctypes.windll.user32
+    buf = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(hwnd, buf, 256)
+    return buf.value
+
+def list_terminal_windows():
+    if not _win_api_ready():
+        return []
+    import ctypes.wintypes as wt
+    user32 = ctypes.windll.user32
+    windows = []
+    keywords = ("powershell", "pwsh", "windows terminal", "terminal", "console", "cmd.exe", "命令提示符")
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+    def enum_proc(hwnd, lparam):
+        try:
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            title = _get_window_text(hwnd)
+            cls = _get_class_name(hwnd)
+            key = f"{title} {cls}".lower()
+            if not title or not any(k in key for k in keywords):
+                return True
+            rect = wt.RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                return True
+            width = rect.right - rect.left
+            height = rect.bottom - rect.top
+            if width < 180 or height < 100:
+                return True
+            pid = wt.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            windows.append({
+                "hwnd": str(int(hwnd)),
+                "title": title,
+                "class": cls,
+                "pid": int(pid.value),
+                "rect": {"x": rect.left, "y": rect.top, "w": width, "h": height},
+            })
+        except:
+            pass
+        return True
+
+    user32.EnumWindows(enum_proc, 0)
+    windows.sort(key=lambda w: (0 if "powershell" in w["title"].lower() or "pwsh" in w["title"].lower() else 1, w["title"].lower()))
+    return windows
+
+def capture_window_bmp(hwnd_value):
+    if not _win_api_ready():
+        return None, "Windows only"
+    import ctypes.wintypes as wt
+    user32 = ctypes.windll.user32
+    gdi32 = ctypes.windll.gdi32
+    hwnd = wt.HWND(int(hwnd_value))
+    if not user32.IsWindow(hwnd):
+        return None, "窗口不存在"
+
+    rect = wt.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return None, "无法读取窗口位置"
+    width = max(0, rect.right - rect.left)
+    height = max(0, rect.bottom - rect.top)
+    if width < 2 or height < 2:
+        return None, "窗口已最小化或尺寸过小"
+
+    hdc_window = user32.GetWindowDC(hwnd)
+    if not hdc_window:
+        return None, "无法获取窗口画面"
+    hdc_mem = gdi32.CreateCompatibleDC(hdc_window)
+    hbmp = gdi32.CreateCompatibleBitmap(hdc_window, width, height)
+    old = gdi32.SelectObject(hdc_mem, hbmp)
+    ok = False
+    try:
+        PW_RENDERFULLCONTENT = 0x00000002
+        SRCCOPY = 0x00CC0020
+        ok = bool(user32.PrintWindow(hwnd, hdc_mem, PW_RENDERFULLCONTENT))
+        if not ok:
+            ok = bool(user32.PrintWindow(hwnd, hdc_mem, 0))
+        if not ok:
+            ok = bool(gdi32.BitBlt(hdc_mem, 0, 0, width, height, hdc_window, 0, 0, SRCCOPY))
+        if not ok:
+            return None, "窗口截图失败，请保持窗口可见"
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [
+                ("biSize", wt.DWORD),
+                ("biWidth", wt.LONG),
+                ("biHeight", wt.LONG),
+                ("biPlanes", wt.WORD),
+                ("biBitCount", wt.WORD),
+                ("biCompression", wt.DWORD),
+                ("biSizeImage", wt.DWORD),
+                ("biXPelsPerMeter", wt.LONG),
+                ("biYPelsPerMeter", wt.LONG),
+                ("biClrUsed", wt.DWORD),
+                ("biClrImportant", wt.DWORD),
+            ]
+
+        class BITMAPINFO(ctypes.Structure):
+            _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wt.DWORD * 3)]
+
+        image_size = width * height * 4
+        bmi = BITMAPINFO()
+        bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bmi.bmiHeader.biWidth = width
+        bmi.bmiHeader.biHeight = -height
+        bmi.bmiHeader.biPlanes = 1
+        bmi.bmiHeader.biBitCount = 32
+        bmi.bmiHeader.biCompression = 0
+        bmi.bmiHeader.biSizeImage = image_size
+        data = ctypes.create_string_buffer(image_size)
+        rows = gdi32.GetDIBits(hdc_mem, hbmp, 0, height, data, ctypes.byref(bmi), 0)
+        if rows == 0:
+            return None, "读取截图像素失败"
+        bmp_file_header = struct.pack("<2sIHHI", b"BM", 54 + image_size, 0, 0, 54)
+        bmp_info_header = struct.pack("<IiiHHIIiiII", 40, width, -height, 1, 32, 0, image_size, 0, 0, 0, 0)
+        return {
+            "image": base64.b64encode(bmp_file_header + bmp_info_header + data.raw).decode("ascii"),
+            "mime": "image/bmp",
+            "width": width,
+            "height": height,
+            "title": _get_window_text(hwnd),
+        }, None
+    finally:
+        if old:
+            gdi32.SelectObject(hdc_mem, old)
+        if hbmp:
+            gdi32.DeleteObject(hbmp)
+        if hdc_mem:
+            gdi32.DeleteDC(hdc_mem)
+        user32.ReleaseDC(hwnd, hdc_window)
+
+def _send_input_records(records):
+    user32 = ctypes.windll.user32
+    n = len(records)
+    array_type = INPUT * n
+    arr = array_type(*records)
+    return user32.SendInput(n, arr, ctypes.sizeof(INPUT)) == n
+
+if _win_api_ready():
+    import ctypes.wintypes as wt
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wt.WORD),
+            ("wScan", wt.WORD),
+            ("dwFlags", wt.DWORD),
+            ("time", wt.DWORD),
+            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ]
+
+    class INPUT_UNION(ctypes.Union):
+        _fields_ = [("ki", KEYBDINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", wt.DWORD), ("union", INPUT_UNION)]
+
+def _key_record(vk=0, scan=0, flags=0):
+    return INPUT(1, INPUT_UNION(ki=KEYBDINPUT(vk, scan, flags, 0, None)))
+
+def send_text_to_window(hwnd_value, text="", enter=False, special=""):
+    if not _win_api_ready():
+        return False, "Windows only"
+    import ctypes.wintypes as wt
+    user32 = ctypes.windll.user32
+    hwnd = wt.HWND(int(hwnd_value))
+    if not user32.IsWindow(hwnd):
+        return False, "窗口不存在"
+    user32.ShowWindow(hwnd, 9)
+    user32.SetForegroundWindow(hwnd)
+    time.sleep(0.05)
+
+    KEYEVENTF_KEYUP = 0x0002
+    KEYEVENTF_UNICODE = 0x0004
+    VK_RETURN = 0x0D
+    VK_BACK = 0x08
+    VK_ESCAPE = 0x1B
+    VK_TAB = 0x09
+    VK_CONTROL = 0x11
+    special_map = {"enter": VK_RETURN, "backspace": VK_BACK, "escape": VK_ESCAPE, "tab": VK_TAB}
+    records = []
+
+    if special == "ctrl_c":
+        records.extend([_key_record(VK_CONTROL), _key_record(ord("C")), _key_record(ord("C"), flags=KEYEVENTF_KEYUP), _key_record(VK_CONTROL, flags=KEYEVENTF_KEYUP)])
+    elif special in special_map:
+        vk = special_map[special]
+        records.extend([_key_record(vk), _key_record(vk, flags=KEYEVENTF_KEYUP)])
+    else:
+        for ch in text:
+            if ch in "\r\n":
+                continue
+            code = ord(ch)
+            records.extend([_key_record(0, code, KEYEVENTF_UNICODE), _key_record(0, code, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)])
+        if enter:
+            records.extend([_key_record(VK_RETURN), _key_record(VK_RETURN, flags=KEYEVENTF_KEYUP)])
+
+    if not records:
+        return False, "没有可发送的输入"
+    return (_send_input_records(records), None)
 
 # ─── CC-Web 内置会话 ───
 
@@ -414,24 +792,34 @@ def rename_item(old_path, new_path):
 
 # ─── 缓存 ───
 
+STATUS_CACHE_TTL = 1.5
+PROCESS_CACHE_TTL = 3
+NET_CACHE_TTL = 30
+GPU_CACHE_TTL = 300
 cache = {}
 cache_time = 0
+cache_lock = threading.RLock()
+gpu_lock = threading.Lock()
+gpu_cache = {"value": "检测中", "time": 0, "loading": False}
+process_cache = {"value": [], "time": 0}
+net_cache = {"value": None, "time": 0}
 
 def get_all_status():
     global cache, cache_time
     now = time.time()
-    if now - cache_time < 3 and cache:
+    with cache_lock:
+        if now - cache_time < STATUS_CACHE_TTL and cache:
+            return cache
+        net = get_network_info_cached()
+        sysinfo = get_all_system_info_fast()
+        cache = {
+            "cpu": sysinfo["cpu"], "mem": sysinfo["mem"], "disks": sysinfo["disks"],
+            "uptime": sysinfo["uptime"], "procs": sysinfo["procs"],
+            "net": net, "gpu": get_gpu_info_cached(), "top": sysinfo["top"],
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+        cache_time = now
         return cache
-    net = get_network_info()
-    sysinfo = get_all_system_info()
-    cache = {
-        "cpu": sysinfo["cpu"], "mem": sysinfo["mem"], "disks": sysinfo["disks"],
-        "uptime": sysinfo["uptime"], "procs": sysinfo["procs"],
-        "net": net, "gpu": get_gpu_info(), "top": sysinfo["top"],
-        "ts": time.strftime("%Y-%m-%d %H:%M:%S")
-    }
-    cache_time = now
-    return cache
 
 # ─── HTML ───
 
@@ -631,18 +1019,81 @@ body::after{content:'';position:fixed;top:0;left:0;width:2px;height:2px;backgrou
 .cc-new,.cc-send{animation:pillGlow 3s ease-in-out infinite}
 @keyframes tabScan{0%,100%{transform:translateX(-30%);opacity:.4}50%{transform:translateX(30%);opacity:1}}
 @keyframes ccSweep{0%,55%{transform:translateX(-120%)}100%{transform:translateX(120%)}}
+@keyframes gridDrift{0%{background-position:0 0,0 0}100%{background-position:0 36px,36px 0}}
+@keyframes scanBeam{0%,100%{transform:translateY(-30%);opacity:.08}50%{transform:translateY(45%);opacity:.22}}
+@keyframes holoSweep{0%{transform:translateX(-140%) skewX(-12deg)}100%{transform:translateX(140%) skewX(-12deg)}}
+@keyframes ringSpin{to{transform:rotate(360deg)}}
+@keyframes ringPulse{0%,100%{filter:drop-shadow(0 0 8px rgba(64,196,255,.22))}50%{filter:drop-shadow(0 0 18px rgba(105,240,174,.38))}}
+@keyframes navPulse{0%,100%{box-shadow:inset 0 0 18px rgba(64,196,255,.05)}50%{box-shadow:inset 0 0 28px rgba(105,240,174,.1)}}
+html{background:#030711;scroll-behavior:smooth}
+body{min-height:100svh;padding:max(12px,env(safe-area-inset-top)) 12px calc(76px + env(safe-area-inset-bottom));background:#030711;background-image:linear-gradient(rgba(64,196,255,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(105,240,174,.035) 1px,transparent 1px),radial-gradient(ellipse at 50% -10%,rgba(64,196,255,.22),transparent 42%);background-size:36px 36px,36px 36px,100% 100%;animation:gridDrift 18s linear infinite;color:#edf8ff;overflow-x:hidden}
+body::before{inset:0;background:linear-gradient(180deg,transparent 0%,rgba(64,196,255,.08) 48%,transparent 58%);animation:scanBeam 7s ease-in-out infinite;z-index:-1}
+body::after{inset:0;width:auto;height:auto;background:repeating-linear-gradient(0deg,rgba(255,255,255,.025) 0 1px,transparent 1px 4px);box-shadow:none;animation:none;mix-blend-mode:screen}
+#fxCanvas{position:fixed;inset:0;width:100%;height:100%;z-index:-2;pointer-events:none;opacity:.7}
+.hdr{position:relative;text-align:left;display:grid;grid-template-columns:86px 1fr;gap:14px;align-items:center;padding:16px;margin:0 0 12px;border:1px solid rgba(91,223,255,.18);border-radius:8px;background:linear-gradient(135deg,rgba(255,255,255,.085),rgba(255,255,255,.025));box-shadow:0 16px 45px rgba(0,0,0,.32),inset 0 1px 0 rgba(255,255,255,.08);overflow:hidden}
+.hdr::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(105,240,174,.16),transparent);animation:holoSweep 4s ease-in-out infinite;pointer-events:none}
+.hero-core{position:relative;width:78px;aspect-ratio:1;border-radius:50%;background:conic-gradient(from 180deg,#69f0ae,#40c4ff,#ff4fd8,#ffd166,#69f0ae);animation:ringSpin 8s linear infinite,ringPulse 2.8s ease-in-out infinite}
+.hero-core::before{content:'';position:absolute;inset:7px;border-radius:50%;background:#06111d;border:1px solid rgba(255,255,255,.12)}
+.hero-core::after{content:'';position:absolute;inset:22px;border-radius:50%;background:radial-gradient(circle,#edf8ff 0 12%,#69f0ae 13% 26%,transparent 27%);box-shadow:0 0 18px rgba(105,240,174,.8)}
+.signal{display:inline-flex;align-items:center;gap:7px;color:#69f0ae;font-size:11px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase}
+.signal i{width:8px;height:8px;border-radius:50%;background:#69f0ae;box-shadow:0 0 12px #69f0ae;animation:statusPulse 1.6s ease-in-out infinite}
+.hdr h1{font-size:22px;line-height:1.1;margin:5px 0 8px;font-weight:900;color:#fff;text-shadow:0 0 18px rgba(64,196,255,.25)}
+.hdr .sub{display:inline-flex;margin:0 6px 6px 0;padding:5px 8px;border-radius:999px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);color:#b8c8d8;font-size:11px}
+.tabs{position:sticky;top:8px;z-index:10;margin-bottom:12px;padding:4px;border-radius:8px;background:rgba(4,9,18,.82);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border-color:rgba(91,223,255,.16);box-shadow:0 12px 28px rgba(0,0,0,.28);animation:navPulse 4s ease-in-out infinite}
+.tab{border-radius:6px;padding:11px 6px;color:#91a8bd}
+.tab.active{background:linear-gradient(135deg,rgba(105,240,174,.22),rgba(64,196,255,.14));color:#fff;text-shadow:0 0 12px rgba(105,240,174,.45)}
+.card{position:relative;border-radius:8px;background:linear-gradient(145deg,rgba(255,255,255,.085),rgba(255,255,255,.025));border-color:rgba(91,223,255,.13);box-shadow:0 14px 34px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.08);overflow:hidden}
+.card::before{content:'';position:absolute;inset:0;background:linear-gradient(120deg,transparent,rgba(255,255,255,.05),transparent);transform:translateX(-130%);animation:holoSweep 6s ease-in-out infinite;pointer-events:none}
+.ct{color:#8fb3c7;font-weight:800;letter-spacing:1.4px}
+.metrics-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.metric-card{min-height:172px;text-align:left;padding:14px;isolation:isolate}
+.metric-card .ct{margin-bottom:8px}
+.metric-top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.metric-ring{position:relative;width:92px;aspect-ratio:1;border-radius:50%;background:conic-gradient(var(--c) calc(var(--p)*1%),rgba(255,255,255,.08) 0);box-shadow:inset 0 0 0 1px rgba(255,255,255,.08),0 0 28px color-mix(in srgb,var(--c),transparent 70%)}
+.metric-ring::before{content:'';position:absolute;inset:9px;border-radius:50%;background:#07111c;border:1px solid rgba(255,255,255,.09)}
+.metric-ring::after{content:'';position:absolute;inset:-5px;border-radius:50%;border:1px dashed rgba(255,255,255,.16);animation:ringSpin 12s linear infinite}
+.metric-card .bnum{position:absolute;right:17px;bottom:32px;font-size:38px;color:var(--c)!important;text-shadow:0 0 18px color-mix(in srgb,var(--c),transparent 45%)}
+.metric-card .si{position:absolute;right:18px;bottom:17px;max-width:48%;text-align:right;color:#a7b4c1}
+.metric-sub{position:absolute;left:14px;right:14px;bottom:15px;display:flex;gap:6px;flex-wrap:wrap}
+.metric-sub span,.telemetry-chips span{padding:5px 7px;border-radius:999px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.08);font-size:10px;color:#a8bbca}
+.live-card{padding:14px}
+#pulseCanvas{width:100%;height:140px;display:block;border-radius:8px;background:linear-gradient(180deg,rgba(64,196,255,.08),rgba(105,240,174,.025));border:1px solid rgba(255,255,255,.07);box-shadow:inset 0 0 40px rgba(64,196,255,.06)}
+.telemetry-chips{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:9px}
+.telemetry-chips span{text-align:center;border-radius:6px}
+.bw{height:24px;border-radius:8px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.07)}
+.bf{border-radius:8px}
+.dr{padding:10px;border-radius:8px;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.06)}
+.pr,.exp-item,.fitem{min-height:42px;border-color:rgba(255,255,255,.06)}
+.exp-toolbar{display:grid;grid-template-columns:repeat(4,42px);gap:8px}
+.exp-addr,.exp-search{grid-column:1/-1;border-radius:8px;background:rgba(255,255,255,.07)}
+.exp-btn,.sbtn,.ts,.cc-send,.cc-new{border-radius:8px;min-height:42px}
+.exp-btn{display:inline-flex;align-items:center;justify-content:center}
+.drive-grid{grid-template-columns:1fr}
+.drive-card{border-radius:8px;background:linear-gradient(145deg,rgba(255,255,255,.08),rgba(255,255,255,.025));border-color:rgba(91,223,255,.13)}
+.drive-card-bg{border-radius:0 0 8px 8px}
+.drive-card-body{padding:16px}
+.tbox{border-radius:8px;background:rgba(1,7,10,.92);box-shadow:0 0 36px rgba(105,240,174,.12),inset 0 0 45px rgba(64,196,255,.035)}
+.footer{padding:10px 12px calc(10px + env(safe-area-inset-bottom));background:rgba(3,7,17,.82);border-color:rgba(91,223,255,.14);color:#8fa5b7}
+@media(max-width:430px){.hdr{grid-template-columns:64px 1fr;padding:13px;gap:11px}.hero-core{width:62px}.hdr h1{font-size:19px}.metrics-row{gap:8px}.metric-card{min-height:150px;padding:12px}.metric-ring{width:72px}.metric-card .bnum{font-size:30px;right:13px;bottom:30px}.metric-card .si{right:13px;bottom:15px;font-size:11px}.metric-sub{left:12px;right:12px;bottom:12px}.telemetry-chips{grid-template-columns:repeat(2,1fr)}#pulseCanvas{height:120px}.ct{font-size:11px}.exp-toolbar{grid-template-columns:repeat(4,1fr)}.cc-head{display:grid;grid-template-columns:1fr 1fr}.cc-head input,.cc-pill{grid-column:1/-1}.cc-send{width:64px}.cc-input{gap:6px;padding:10px}}
 @media(max-width:375px){body{padding:10px;padding-bottom:70px}.hdr h1{font-size:17px}.hdr .sub{font-size:11px}.bnum{font-size:28px}.bnum .u{font-size:13px}.card{padding:12px;margin-bottom:10px;border-radius:10px}.ct{font-size:11px}.tab{padding:8px 4px;font-size:12px}.row{gap:8px}.drive-card-body{padding:14px;gap:12px}.drive-ring{width:64px;height:64px}.drive-ring svg{width:64px;height:64px}.drive-ring-pct{font-size:16px}.drive-letter{font-size:20px}.sbtn{padding:8px 14px;font-size:13px}.exp-item{padding:8px 6px}.exp-item .exp-time{display:none}.exp-header .exp-htime{display:none}}
 @media(min-width:376px) and (max-width:768px){body{padding:14px;padding-bottom:76px}.hdr h1{font-size:19px}.bnum{font-size:32px}}
 @media(max-width:700px){.cc-shell{grid-template-columns:1fr}.cc-side{border-right:0;border-bottom:1px solid rgba(255,255,255,.08);max-height:190px}.cc-messages{max-height:58vh}.cc-input textarea{min-height:44px}}
 @media(max-height:500px) and (orientation:landscape){.hdr{padding:10px 0 8px}.hdr h1{font-size:16px}.tabs{margin-bottom:8px}.tab{padding:6px;font-size:12px}.cc-messages{max-height:40vh}}
 @media(prefers-reduced-motion:reduce){.card,.drive-card,.tab,.hdr,.tabs{animation:none!important}.bf::after{animation:none}.ld{animation:pulse 2s infinite}.cc-pill{animation:none}body::before{animation:none}body::after{animation:none}.exp-context{transition:none}.tab-content.active{animation:none}}
+@keyframes tabFlipIn{from{transform:perspective(800px) rotateY(12deg);opacity:0}to{transform:perspective(800px) rotateY(0);opacity:1}}
+@keyframes tabFlipOut{from{transform:perspective(800px) rotateY(0);opacity:1}to{transform:perspective(800px) rotateY(-12deg);opacity:0}}
 </style>
 </head>
 <body>
+<canvas id="fxCanvas"></canvas>
 <div class="hdr">
-  <h1 id="hostname">{{HOSTNAME}}</h1>
-  <div class="sub">{{IP}}</div>
-  <div class="sub">{{UPTIME}}</div>
+  <div class="hero-core"></div>
+  <div>
+    <div class="signal"><i></i>ONLINE</div>
+    <h1 id="hostname">{{HOSTNAME}}</h1>
+    <div class="sub">{{IP}}</div>
+    <div class="sub">{{UPTIME}}</div>
+  </div>
 </div>
 
 <div class="tabs">
@@ -654,17 +1105,37 @@ body::after{content:'';position:fixed;top:0;left:0;width:2px;height:2px;backgrou
 
 <!-- Status -->
 <div class="tab-content active" id="tab-status">
-  <div class="row">
-    <div class="card"><div class="ct">CPU</div><div class="bnum" style="color:{{CPU_C}}">{{CPU}}<span class="u">%</span></div></div>
-    <div class="card"><div class="ct">MEM</div><div class="bnum" style="color:{{MEM_C}}">{{MEM_P}}<span class="u">%</span></div><div class="si">{{MEM_U}} / {{MEM_T}} GB</div></div>
+  <div class="metrics-row">
+    <div class="card metric-card" style="--c:#69f0ae;--p:{{CPU}}">
+      <div class="ct">CPU</div>
+      <div class="metric-top">
+        <div class="metric-ring"></div>
+        <div class="metric-sub"><span id="cpuCores">-</span><span id="cpuProc">{{PROC}}</span></div>
+      </div>
+      <div class="bnum" id="cpuNum">{{CPU}}<span class="u">%</span></div>
+      <div class="si" id="cpuInfo">-</div>
+    </div>
+    <div class="card metric-card" style="--c:#40c4ff;--p:{{MEM_P}}">
+      <div class="ct">MEMORY</div>
+      <div class="metric-top">
+        <div class="metric-ring"></div>
+        <div class="si" id="memInfo">{{MEM_U}} / {{MEM_T}} GB</div>
+      </div>
+      <div class="bnum" id="memNum">{{MEM_P}}<span class="u">%</span></div>
+      <div class="metric-sub"><span id="memUsed">{{MEM_U}} GB</span><span id="memFree">{{MEM_F}} GB free</span></div>
+    </div>
   </div>
-  <div class="card"><div class="ct">CPU Usage</div><div class="bw"><div class="bf {{CPU_B}}" style="width:{{CPU}}%"><span class="bl">{{CPU}}%</span></div></div></div>
-  <div class="card"><div class="ct">Memory</div><div class="bw"><div class="bf {{MEM_B}}" style="width:{{MEM_P}}%"><span class="bl">{{MEM_U}} / {{MEM_T}} GB</span></div></div></div>
+  <div class="card live-card">
+    <div class="ct">LIVE MONITOR</div>
+    <canvas id="pulseCanvas"></canvas>
+    <div class="telemetry-chips">
+      <span>CPU <b id="tCpu">{{CPU}}%</b></span>
+      <span>MEM <b id="tMem">{{MEM_P}}%</b></span>
+      <span>PROCS <b id="tProc">{{PROC}}</b></span>
+      <span id="tGpuSpan">GPU <b id="tGpu">{{GPU}}</b></span>
+    </div>
+  </div>
   <div class="card"><div class="ct">DISK</div>{{DISKS}}</div>
-  <div class="row">
-    <div class="card"><div class="ct">PROCS</div><div class="bnum" style="color:#ce93d8">{{PROC}}</div></div>
-    <div class="card"><div class="ct">GPU</div><div class="gpu">{{GPU}}</div></div>
-  </div>
   <div class="card" id="procCard">
     <div class="ct">进程管理 <span style="font-size:11px;color:#888">(右键结束进程)</span></div>
     <div style="margin-bottom:10px;display:flex;gap:8px">
@@ -763,11 +1234,15 @@ body::after{content:'';position:fixed;top:0;left:0;width:2px;height:2px;backgrou
 <div class="footer"><span class="ld"></span> <span id="ts">{{TIMESTAMP}}</span></div>
 
 <script>
-// Tab
+// Tab — 3D flip transition
 function switchTab(n){
   document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['status','files','tools','ccweb'][i]===n));
-  document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
-  document.getElementById('tab-'+n).classList.add('active');
+  const cur=document.querySelector('.tab-content.active');
+  const nxt=document.getElementById('tab-'+n);
+  if(cur&&cur!==nxt){
+    cur.style.animation='tabFlipOut .2s ease forwards';
+    setTimeout(()=>{cur.classList.remove('active');cur.style.animation='';nxt.classList.add('active');nxt.style.animation='tabFlipIn .3s ease both';},180);
+  }else if(!cur){nxt.classList.add('active');nxt.style.animation='tabFlipIn .3s ease both';}
   if(n==='ccweb')ccLoad();
   if(n==='files')expLoad();
 }
@@ -779,12 +1254,14 @@ function animateValue(el,end,suffix,dur){
   const start=_animState[key]||0;
   _animState[key]=end;
   if(start===end)return;
+  const delta=end-start;
   const st=performance.now();
   (function tick(now){
     const p=Math.min((now-st)/(dur||400),1);
     const ease=1-Math.pow(1-p,3);
     const v=Math.round(start+(end-start)*ease);
     el.innerHTML=v+'<span class="u">'+suffix+'</span>';
+    if(p>=1&&Math.abs(delta)>8)flashVal(el,delta);
     if(p<1)requestAnimationFrame(tick);
   })(st);
 }
@@ -797,9 +1274,25 @@ async function sched(){
     if(document.hidden)return;
     try{
       const d=await(await fetch('/api')).json();
-      animateValue(document.querySelector('#tab-status .row .card:first-child .bnum'),d.cpu,'%');
-      animateValue(document.querySelector('#tab-status .row .card:last-child .bnum'),d.mem.percent,'%');
-      document.querySelector('#tab-status .row .card:last-child .si').textContent=d.mem.used+' / '+d.mem.total+' GB';
+      // Update metric cards
+      const cpuEl=document.getElementById('cpuNum');
+      const memEl=document.getElementById('memNum');
+      if(cpuEl){cpuEl.style.setProperty('--p',d.cpu);cpuEl.innerHTML=d.cpu+'<span class="u">%</span>';}
+      if(memEl){memEl.style.setProperty('--p',d.mem.percent);memEl.innerHTML=d.mem.percent+'<span class="u">%</span>';}
+      const memInfoEl=document.getElementById('memInfo');
+      if(memInfoEl)memInfoEl.textContent=d.mem.used+' / '+d.mem.total+' GB';
+      // Update telemetry chips
+      const tCpu=document.getElementById('tCpu');
+      const tMem=document.getElementById('tMem');
+      const tProc=document.getElementById('tProc');
+      const tGpu=document.getElementById('tGpu');
+      if(tCpu)tCpu.textContent=d.cpu+'%';
+      if(tMem)tMem.textContent=d.mem.percent+'%';
+      if(tProc)tProc.textContent=d.procs;
+      if(tGpu&&d.gpu)tGpu.textContent=d.gpu;
+      // Update pulse canvas
+      if(typeof _pulseData!=='undefined'){_pulseData.push(d.cpu);if(_pulseData.length>60)_pulseData.shift();}
+      // Update footer
       document.getElementById('ts').textContent=d.ts;
       document.querySelector('.hdr .sub:last-child').textContent='Uptime: '+d.uptime;
     }catch(e){}
@@ -809,7 +1302,143 @@ async function sched(){
 document.addEventListener('visibilitychange',sched);
 sched();
 
-// Screenshot
+// Particle background — enhanced
+(function(){
+  const c=document.getElementById('fxCanvas');
+  if(!c)return;
+  const ctx=c.getContext('2d');
+  let w,h,mx=-1e4,my=-1e4;
+  const colors=['105,240,174','64,196,255','118,75,162','255,209,102','255,79,216'];
+  const COUNT=Math.min(180,Math.floor(window.innerWidth*window.innerHeight/6000));
+  const particles=[];
+  function resize(){w=c.width=window.innerWidth;h=c.height=window.innerHeight;}
+  resize();
+  let resizeTimer;window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(resize,200);});
+  document.addEventListener('mousemove',e=>{mx=e.clientX;my=e.clientY;});
+  document.addEventListener('touchmove',e=>{if(e.touches[0]){mx=e.touches[0].clientX;my=e.touches[0].clientY;}},{passive:true});
+  for(let i=0;i<COUNT;i++){
+    const layer=i<COUNT*.3?0:i<COUNT*.7?1:2;
+    const speeds=[.15,.35,.6],sizes=[.8,1.4,2.2],alphas=[.2,.35,.55];
+    particles.push({x:Math.random()*w,y:Math.random()*h,vx:(Math.random()-.5)*speeds[layer],vy:(Math.random()-.5)*speeds[layer],r:Math.random()*sizes[layer]+.4,a:Math.random()*alphas[layer]+.08,color:colors[i%colors.length],trail:[],layer,life:Math.random()*600+200,age:0});
+  }
+  function draw(){
+    ctx.clearRect(0,0,w,h);
+    for(let i=0;i<COUNT;i++){
+      const p=particles[i];
+      p.age++;
+      if(p.age>p.life||p.x<-50||p.x>w+50||p.y<-50||p.y>h+50){
+        p.x=Math.random()*w;p.y=Math.random()*h;
+        p.vx=(Math.random()-.5)*(p.layer===0?.15:p.layer===1?.35:.6);
+        p.vy=(Math.random()-.5)*(p.layer===0?.15:p.layer===1?.35:.6);
+        p.age=0;p.life=Math.random()*600+200;p.trail=[];
+      }
+      const dx=p.x-mx,dy=p.y-my,dist=Math.sqrt(dx*dx+dy*dy);
+      if(dist<120&&dist>0){const f=(120-dist)/120*2;p.vx+=dx/dist*f;p.vy+=dy/dist*f;}
+      p.vx*=.99;p.vy*=.99;
+      p.x+=p.vx;p.y+=p.vy;
+      p.trail.push({x:p.x,y:p.y});
+      if(p.trail.length>8)p.trail.shift();
+      if(p.trail.length>1){
+        ctx.beginPath();ctx.moveTo(p.trail[0].x,p.trail[0].y);
+        for(let t=1;t<p.trail.length;t++)ctx.lineTo(p.trail[t].x,p.trail[t].y);
+        ctx.strokeStyle=`rgba(${p.color},${p.a*.3})`;ctx.lineWidth=p.r*.6;ctx.stroke();
+      }
+      ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);
+      ctx.fillStyle=`rgba(${p.color},${p.a})`;ctx.shadowColor=`rgba(${p.color},${p.a*.5})`;ctx.shadowBlur=p.r*4;ctx.fill();ctx.shadowBlur=0;
+      for(let j=i+1;j<Math.min(i+30,COUNT);j++){
+        const q=particles[j];
+        const ddx=p.x-q.x,ddy=p.y-q.y;
+        const d=Math.sqrt(ddx*ddx+ddy*ddy);
+        if(d<100){
+          ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(q.x,q.y);
+          ctx.strokeStyle=`rgba(${p.color},${.12*(1-d/100)})`;ctx.lineWidth=.5;ctx.stroke();
+        }
+      }
+    }
+    requestAnimationFrame(draw);
+  }
+  draw();
+})();
+
+// 3D card tilt on touch/hover
+(function(){
+  const cards=document.querySelectorAll('.card,.drive-card');
+  if(!cards.length)return;
+  cards.forEach(card=>{
+    card.style.transformStyle='preserve-3d';
+    card.style.transition='transform .15s ease-out,box-shadow .3s';
+    function tilt(ex,ey){
+      const r=card.getBoundingClientRect();
+      const cx=r.left+r.width/2,cy=r.top+r.height/2;
+      const rx=(ey-cy)/(r.height/2)*-8;
+      const ry=(ex-cx)/(r.width/2)*8;
+      card.style.transform=`perspective(600px) rotateX(${rx}deg) rotateY(${ry}deg) translateZ(6px)`;
+      card.style.boxShadow=`0 0 24px rgba(105,240,174,.15),${-ry*2}px ${rx*2}px 40px rgba(0,0,0,.3)`;
+    }
+    function reset(){card.style.transform='';card.style.boxShadow='';}
+    card.addEventListener('mousemove',e=>tilt(e.clientX,e.clientY));
+    card.addEventListener('mouseleave',reset);
+    card.addEventListener('touchmove',e=>{if(e.touches[0])tilt(e.touches[0].clientX,e.touches[0].clientY);},{passive:true});
+    card.addEventListener('touchend',reset);
+  });
+})();
+
+// Number change color flash
+const _lastVals={};
+function flashVal(el,delta){
+  if(Math.abs(delta)<5)return;
+  el.style.transition='text-shadow .15s';
+  el.style.textShadow=delta>0?'0 0 20px #69f0ae,0 0 40px #69f0ae':'0 0 20px #ff5252,0 0 40px #ff5252';
+  setTimeout(()=>{el.style.transition='text-shadow .5s';el.style.textShadow='';},200);
+}
+
+// Pulse canvas
+const _pulseData=[];
+(function(){
+  const c=document.getElementById('pulseCanvas');
+  if(!c)return;
+  const ctx=c.getContext('2d');
+  function resize(){c.width=c.offsetWidth*2;c.height=c.offsetHeight*2;ctx.scale(2,2);}
+  resize();
+  window.addEventListener('resize',resize);
+  function draw(){
+    const w=c.offsetWidth,h=c.offsetHeight;
+    ctx.clearRect(0,0,w,h);
+    if(_pulseData.length<2){requestAnimationFrame(draw);return;}
+    const grad=ctx.createLinearGradient(0,0,0,h);
+    grad.addColorStop(0,'rgba(64,196,255,.35)');grad.addColorStop(1,'rgba(105,240,174,.02)');
+    ctx.beginPath();ctx.moveTo(0,h);
+    _pulseData.forEach((v,i)=>{
+      const x=(i/59)*w;
+      const y=h-(v/100)*h*.85;
+      if(i===0)ctx.lineTo(x,y);
+      else{
+        const px=((i-1)/59)*w;
+        const py=h-(_pulseData[i-1]/100)*h*.85;
+        const cx=(px+x)/2;
+        ctx.bezierCurveTo(cx,py,cx,y,x,y);
+      }
+    });
+    ctx.lineTo(w,h);ctx.closePath();ctx.fillStyle=grad;ctx.fill();
+    ctx.beginPath();
+    _pulseData.forEach((v,i)=>{
+      const x=(i/59)*w;
+      const y=h-(v/100)*h*.85;
+      if(i===0)ctx.moveTo(x,y);
+      else{
+        const px=((i-1)/59)*w;
+        const py=h-(_pulseData[i-1]/100)*h*.85;
+        const cx=(px+x)/2;
+        ctx.bezierCurveTo(cx,py,cx,y,x,y);
+      }
+    });
+    ctx.strokeStyle='rgba(105,240,174,.8)';ctx.lineWidth=2;ctx.shadowColor='rgba(105,240,174,.5)';ctx.shadowBlur=8;ctx.stroke();ctx.shadowBlur=0;
+    requestAnimationFrame(draw);
+  }
+  draw();
+})();
+
+// Screenshot — multi-stage dramatic effect
 async function takeSS(){
   const btn=document.getElementById('ssBtn');
   btn.disabled=true;btn.innerHTML='<span class="loading">&#8635;</span> Capturing...';
@@ -817,15 +1446,22 @@ async function takeSS(){
     const r=await fetch('/api/screenshot');
     const d=await r.json();
     if(d.ok){
-      // Flash effect
-      const f=document.createElement('div');f.className='ss-flash';
-      document.body.appendChild(f);
-      setTimeout(()=>f.remove(),500);
-      document.getElementById('ssImg').src='data:image/jpeg;base64,'+d.image;
-      document.getElementById('ssImg').style.animation='none';
-      void document.getElementById('ssImg').offsetWidth;
-      document.getElementById('ssImg').style.animation='captureSlideIn .4s ease';
-      document.getElementById('ssCard').style.display='block';
+      // Stage 1: white flash
+      const f=document.createElement('div');f.style.cssText='position:fixed;inset:0;background:rgba(255,255,255,.9);z-index:9999;pointer-events:none;animation:captureFlash .5s ease-out forwards';
+      document.body.appendChild(f);setTimeout(()=>f.remove(),500);
+      // Stage 2: vignette
+      setTimeout(()=>{
+        const v=document.createElement('div');v.style.cssText='position:fixed;inset:0;background:radial-gradient(ellipse,transparent 40%,rgba(0,0,0,.6) 100%);z-index:9998;pointer-events:none;animation:captureFlash .8s ease-out forwards';
+        document.body.appendChild(v);setTimeout(()=>v.remove(),800);
+      },100);
+      // Stage 3: image reveal with chromatic shift
+      setTimeout(()=>{
+        const img=document.getElementById('ssImg');
+        img.src='data:image/jpeg;base64,'+d.image;
+        img.style.animation='none';void img.offsetWidth;
+        img.style.animation='captureSlideIn .5s ease both';
+        document.getElementById('ssCard').style.display='block';
+      },250);
     }else alert('Failed');
   }catch(e){alert('Error: '+e.message)}
   btn.disabled=false;btn.innerHTML='Screenshot';
@@ -1304,20 +1940,9 @@ function login(){
                 self.send_error(404)
             return
         elif path == "/api/processes":
-            # 使用 psutil 快速获取进程列表
             if HAS_PSUTIL:
                 try:
-                    procs = []
-                    for p in psutil.process_iter(['pid', 'name', 'cpu_times', 'memory_info']):
-                        try:
-                            info = p.info
-                            cpu = sum(info['cpu_times'][:2]) if info['cpu_times'] else 0
-                            mem = round(info['memory_info'].rss / 1048576) if info['memory_info'] else 0
-                            procs.append({'pid': info['pid'], 'name': info['name'] or 'N/A', 'cpu': round(cpu, 1), 'mem': mem})
-                        except:
-                            continue
-                    procs.sort(key=lambda x: x['cpu'], reverse=True)
-                    self.json_resp({'procs': procs})
+                    self.json_resp({'procs': get_processes_fast()})
                 except Exception as e:
                     self.json_resp({'error': str(e)})
             else:

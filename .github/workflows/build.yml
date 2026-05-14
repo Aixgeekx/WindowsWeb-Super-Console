@@ -39,10 +39,25 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
           "exe=WindowsWeb-Super-Console-v$version.exe" >> $env:GITHUB_OUTPUT
 
+      - name: Build sysinfo DLL
+        shell: pwsh
+        run: |
+          if (Test-Path scripts/sysinfo.cpp) {
+            $gpp = Get-Command g++ -ErrorAction SilentlyContinue
+            if ($gpp) {
+              g++ -shared -O2 -static -o sysinfo.dll scripts/sysinfo.cpp -lpsapi
+              Write-Host "DLL built with MinGW"
+            } else {
+              Write-Host "MinGW not found, skipping DLL build"
+            }
+          }
+
       - name: Build EXE
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onefile --name "WindowsWeb-Super-Console-v${{ steps.version.outputs.version }}" server.py
+          $dllFlag = ""
+          if (Test-Path sysinfo.dll) { $dllFlag = "--add-data `"sysinfo.dll;.`"" }
+          pyinstaller --noconfirm --clean --onefile $dllFlag --name "WindowsWeb-Super-Console-v${{ steps.version.outputs.version }}" server.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
