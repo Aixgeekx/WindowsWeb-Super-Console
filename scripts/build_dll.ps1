@@ -8,7 +8,7 @@ $out = Join-Path $repo $Output
 $vcvars = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\*\*\VC\Auxiliary\Build\vcvarsall.bat" -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($vcvars) {
     Write-Host "Building with MSVC..."
-    cmd /c "`"$($vcvars.FullName)`" x64 && cl /LD /O2 /EHsc `"$src`" /Fe:`"$out`" /link /EXPORT:get_system_info psapi.lib"
+    cmd /c "`"$($vcvars.FullName)`" x64 && cl /LD /O2 /EHsc `"$src`" /Fe:`"$out`" /link /EXPORT:get_system_info psapi.lib user32.lib"
     Write-Host "Built: $out"
     exit 0
 }
@@ -17,7 +17,7 @@ if ($vcvars) {
 $gpp = Get-Command g++ -ErrorAction SilentlyContinue
 if ($gpp) {
     Write-Host "Building with MinGW..."
-    g++ -shared -O2 -static -o "$out" "$src" -lpsapi
+    g++ -shared -O2 -static -o "$out" "$src" -lpsapi -luser32
     Write-Host "Built: $out"
     exit 0
 }
