@@ -7,6 +7,7 @@
 import subprocess
 import socket
 import os
+import html
 import time
 import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
