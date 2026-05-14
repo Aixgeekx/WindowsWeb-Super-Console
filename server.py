@@ -662,6 +662,7 @@ def set_keep_screen_alive(enable):
 # ─── 截屏 ───
 
 def take_screenshot():
+    """Returns (image_base64, mime_type) tuple"""
     ps_script = '''
     Add-Type @"
     using System;
@@ -691,21 +692,21 @@ def take_screenshot():
     [Convert]::ToBase64String($ms.ToArray())
     $g.Dispose(); $bmp.Dispose(); $ms.Dispose()
     '''
-    # Try native DLL first
+    # Try native DLL first (returns BMP)
     if _sysinfo_dll:
         try:
             buf = ctypes.create_string_buffer(1024 * 1024)  # 1MB buffer
             if _sysinfo_dll.take_screenshot(buf, len(buf)) == 0 and buf.value:
-                return buf.value.decode("utf-8")
+                return buf.value.decode("utf-8"), "image/bmp"
         except: pass
-    # Fallback to PowerShell
+    # Fallback to PowerShell (returns JPEG)
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-Command", ps_script], capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace")
         if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
+            return r.stdout.strip(), "image/jpeg"
     except:
         pass
-    return None
+    return None, None
 
 # ─── 文件浏览 ───
 
@@ -1465,7 +1466,7 @@ async function takeSS(){
       // Stage 3: image reveal with chromatic shift
       setTimeout(()=>{
         const img=document.getElementById('ssImg');
-        img.src='data:image/jpeg;base64,'+d.image;
+        img.src='data:'+d.mime+';base64,'+d.image;
         img.style.animation='none';void img.offsetWidth;
         img.style.animation='captureSlideIn .5s ease both';
         document.getElementById('ssCard').style.display='block';
@@ -1899,8 +1900,8 @@ function login(){
         elif path == "/api":
             self.json_resp(get_all_status())
         elif path == "/api/screenshot":
-            img = take_screenshot()
-            self.json_resp({"ok": bool(img), "image": img or ""})
+            img, mime = take_screenshot()
+            self.json_resp({"ok": bool(img), "image": img or "", "mime": mime or "image/jpeg"})
         elif path == "/api/drives":
             self.json_resp({"drives": get_drives()})
         elif path == "/font.ttf":

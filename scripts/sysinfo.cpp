@@ -1,6 +1,6 @@
 // sysinfo.cpp — Fast system info collection via Windows APIs
 // Compile: cl /LD /O2 sysinfo.cpp /Fe:sysinfo.dll /link /EXPORT:get_system_info
-// Or:      g++ -shared -O2 -static -o sysinfo.dll sysinfo.cpp -ladvapi32 -lole32 -luuid
+// Or:      g++ -shared -O2 -static -o sysinfo.dll sysinfo.cpp -ladvapi32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <psapi.h>
@@ -8,8 +8,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <objbase.h>
-#include <gdiplus.h>
 
 #pragma comment(lib, "psapi.lib")
 
@@ -204,7 +202,7 @@ extern "C" __declspec(dllexport) int __cdecl get_system_info(char* buf, int bufS
     return 0;
 }
 
-// Screenshot via GDI+ — returns base64 JPEG, 0=success
+// Screenshot via raw GDI — returns base64 BMP, 0=success
 extern "C" __declspec(dllexport) int take_screenshot(char* buf, int bufSize) {
     typedef BOOL (WINAPI *SetProcessDPIAware_t)();
     HMODULE hU32 = GetModuleHandleW(L"user32.dll");
@@ -222,61 +220,43 @@ extern "C" __declspec(dllexport) int take_screenshot(char* buf, int bufSize) {
     SelectObject(hMem, hOld);
     ReleaseDC(NULL, hScreen);
 
-    Gdiplus::GdiplusStartupInput input;
-    ULONG_PTR token;
-    Gdiplus::GdiplusStartup(&token, &input, NULL);
-
-    Gdiplus::Bitmap bmp(hBmp, NULL);
-    CLSID jpegClsid;
-    UINT num = 0, size = 0;
-    Gdiplus::GetImageEncodersSize(&num, &size);
-    Gdiplus::ImageCodecInfo* pEncoders = (Gdiplus::ImageCodecInfo*)malloc(size);
-    Gdiplus::GetImageEncoders(num, size, pEncoders);
-    for (UINT i = 0; i < num; i++) {
-        if (wcscmp(pEncoders[i].MimeType, L"image/jpeg") == 0) {
-            jpegClsid = pEncoders[i].Clsid;
-            break;
-        }
-    }
-    free(pEncoders);
-
-    IStream* pStream = NULL;
-    CreateStreamOnHGlobal(NULL, TRUE, &pStream);
-    Gdiplus::EncoderParameters eps;
-    eps.Count = 1;
-    eps.Parameter[0].Guid = Gdiplus::EncoderQuality;
-    eps.Parameter[0].Type = Gdiplus::EncoderParameterValueTypeLong;
-    eps.Parameter[0].NumberOfValues = 1;
-    ULONG quality = 60;
-    eps.Parameter[0].Value = &quality;
-    bmp.Save(pStream, &jpegClsid, &eps);
-
-    STATSTG stat;
-    pStream->Stat(&stat, 1);
-    ULONG len = (ULONG)stat.cbSize.QuadPart;
-    if (len > 0 && len < (ULONG)(bufSize - 8)) {
-        LARGE_INTEGER zero = {0};
-        pStream->Seek(zero, STREAM_SEEK_SET, NULL);
-        pStream->Read((void*)buf, len, &len);
-        // Base64 encode
-        const char* tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        int o = 0;
-        for (ULONG i = 0; i < len; i += 3) {
-            unsigned int n = ((unsigned char)buf[i]) << 16;
-            if (i + 1 < len) n |= ((unsigned char)buf[i+1]) << 8;
-            if (i + 2 < len) n |= ((unsigned char)buf[i+2]);
-            buf[o++] = tbl[(n >> 18) & 63];
-            buf[o++] = tbl[(n >> 12) & 63];
-            buf[o++] = (i + 1 < len) ? tbl[(n >> 6) & 63] : '=';
-            buf[o++] = (i + 2 < len) ? tbl[n & 63] : '=';
-        }
-        buf[o] = 0;
-    } else {
-        buf[0] = 0; len = 0;
-    }
-
-    pStream->Release();
-    Gdiplus::GdiplusShutdown(token);
+    // Get BMP info: 32-bit BGRA
+    BITMAPINFOHEADER bi = {};
+    bi.biSize = sizeof(bi);
+    bi.biWidth = w;
+    bi.biHeight = -h; // top-down
+    bi.biPlanes = 1;
+    bi.biBitCount = 32;
+    bi.biCompression = BI_RGB;
+    int rowBytes = w * 4;
+    int rawSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + rowBytes * h;
+    // Build BMP file in a temp heap buffer
+    unsigned char* bmpData = (unsigned char*)malloc(rawSize);
+    if (!bmpData) { DeleteObject(hBmp); DeleteDC(hMem); return -1; }
+    BITMAPFILEHEADER* bfh = (BITMAPFILEHEADER*)bmpData;
+    bfh->bfType = 0x4D42;
+    bfh->bfSize = rawSize;
+    bfh->bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    memcpy(bmpData + sizeof(BITMAPFILEHEADER), &bi, sizeof(bi));
+    HDC hScreen2 = GetDC(NULL);
+    GetDIBits(hScreen2, hBmp, 0, h, bmpData + bfh->bfOffBits, (BITMAPINFO*)&bi, DIB_RGB_COLORS);
+    ReleaseDC(NULL, hScreen2);
     DeleteObject(hBmp); DeleteDC(hMem);
-    return (len > 0) ? 0 : -1;
+
+    // Base64 encode: read from heap, write to output buffer
+    int outMax = bufSize - 4;
+    int o = 0;
+    const char* tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for (int i = 0; i < rawSize && o < outMax; i += 3) {
+        unsigned int n = ((unsigned int)bmpData[i]) << 16;
+        if (i + 1 < rawSize) n |= ((unsigned int)bmpData[i+1]) << 8;
+        if (i + 2 < rawSize) n |= ((unsigned int)bmpData[i+2]);
+        buf[o++] = tbl[(n >> 18) & 63];
+        if (o < outMax) buf[o++] = tbl[(n >> 12) & 63];
+        if (o < outMax) buf[o++] = (i + 1 < rawSize) ? tbl[(n >> 6) & 63] : '=';
+        if (o < outMax) buf[o++] = (i + 2 < rawSize) ? tbl[n & 63] : '=';
+    }
+    if (o < bufSize) buf[o] = 0; else buf[bufSize-1] = 0;
+    free(bmpData);
+    return (o > 0) ? 0 : -1;
 }
