@@ -20,8 +20,6 @@ import ctypes
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote, quote
 import sys
-import threading
-import ctypes
 try:
     import psutil
     HAS_PSUTIL = True
